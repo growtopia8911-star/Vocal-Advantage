@@ -1,0 +1,10 @@
+*.code-workspace
+
+# per-machine settings
+config.json
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
