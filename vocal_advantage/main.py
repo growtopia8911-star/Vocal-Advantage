@@ -1,0 +1,362 @@
+"""Entry point for Vocal Advantage: argument parsing, wiring, shutdown.
+
+This file is glue and nothing else. All behaviour lives in the modules it bolts
+together, which is why there is no state machine here — that is controller.py.
+
+Import rule, and it is load-bearing: nothing in this module may import
+`vocal_advantage.transcriber` (or faster_whisper, or ctranslate2) at module
+level. `cuda_dlls.prepare()` has to register the NVIDIA DLL directories with
+os.add_dll_directory() before ctranslate2 loads, and Python 3.8+ ignores PATH
+for DLL resolution, so a top-level import here would produce an unfixable
+"cublas64_12.dll not found" at startup. See import_transcriber_class().
+"""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import queue
+import sys
+import threading
+import time
+import traceback
+from pathlib import Path
+from typing import Callable
+
+from vocal_advantage import cuda_dlls
+from vocal_advantage.config import CONFIG_PATH, load_config, save_config
+from vocal_advantage.controller import DictationController
+from vocal_advantage.hotkey_spec import HotkeyError, HotkeySpec, parse_hotkey
+
+VERSION = "0.1.0"
+
+# Two instances would both hook the keyboard and both paste — every dictation
+# would land twice. "Local\" scopes the name to this login session, which is
+# what we want for a per-user desktop app.
+MUTEX_NAME = r"Local\VocalAdvantageSingleInstance"
+ERROR_ALREADY_EXISTS = 183
+
+TICK_INTERVAL_S = 1.0  # how often the controller's 300s watchdog gets a chance to fire
+UI_PUMP_MS = 50        # how often tkinter drains the indicator's queue
+HEARTBEAT_MS = 200     # keeps Ctrl+C responsive and notices a dead controller thread
+
+# Kept for the life of the process: Windows frees a named mutex when the last
+# handle to it closes, so dropping this would let a second instance start.
+_INSTANCE_LOCK: int | None = None
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m vocal_advantage",
+        description=(
+            "Hold a key, speak, let go - your words are pasted into whatever app "
+            "has focus. Everything runs on this PC."
+        ),
+    )
+    parser.add_argument(
+        "--set-hotkey",
+        action="store_true",
+        help="Press the key or combo you want to use, and save it to config.json.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="Vocal Advantage %s" % VERSION,
+    )
+    return parser
+
+
+def acquire_single_instance_lock(name: str = MUTEX_NAME) -> int | None:
+    """Return a mutex handle, or None if another copy of the app already holds it.
+
+    CreateMutexW still returns a valid handle when the name is taken; the way you
+    tell is GetLastError() == ERROR_ALREADY_EXISTS. The caller must keep the
+    returned handle alive for as long as it wants the lock.
+    """
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+    handle = kernel32.CreateMutexW(None, 0, name)
+    last_error = ctypes.get_last_error()
+
+    if handle and last_error == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)  # our duplicate handle; the owner keeps theirs
+        return None
+    if not handle:
+        raise ctypes.WinError(last_error)
+    return handle
+
+
+def import_transcriber_class(prepare: Callable[[], None] = cuda_dlls.prepare):
+    """Wire up the NVIDIA DLL directories, then - and only then - import the model.
+
+    `prepare` is a parameter purely so the ordering can be tested; production
+    always uses cuda_dlls.prepare. The import below is deliberately inside this
+    function: at module level it would run before prepare() ever could.
+    """
+    prepare()
+    from vocal_advantage.transcriber import Transcriber
+
+    return Transcriber
+
+
+def _safe_call(what: str, function: Callable[..., object], *args: object) -> None:
+    """Run a callback; log and continue if it raises.
+
+    One bad utterance (a mic unplugged mid-sentence, a paste target that went
+    away) must never take the hotkey down with it.
+    """
+    try:
+        function(*args)
+    except Exception:  # noqa: BLE001 - deliberately broad; this is the crash barrier
+        print("Error in %s:" % what, file=sys.stderr)
+        traceback.print_exc()
+
+
+def controller_loop(
+    controller,
+    events: "queue.Queue",
+    stop_event: threading.Event,
+    clock: Callable[[], float] = time.monotonic,
+    tick_interval_s: float = TICK_INTERVAL_S,
+) -> None:
+    """Drain the hook's event queue on ONE thread, ticking the watchdog ~1/s.
+
+    The keyboard hook fires on its own thread and only ever enqueues. Everything
+    that reads or writes controller state - including transcription, which takes
+    1-2s - happens here, so the key-up-beats-key-down race cannot happen.
+
+    Ends on either `stop_event` or a None sentinel in the queue; the sentinel is
+    what unblocks a loop that is sitting in get().
+    """
+    next_tick = clock() + tick_interval_s
+    while not stop_event.is_set():
+        timeout = max(0.01, next_tick - clock())
+        try:
+            item = events.get(timeout=timeout)
+        except queue.Empty:
+            _safe_call("watchdog tick", controller.tick)
+            next_tick = clock() + tick_interval_s
+            continue
+
+        if item is None:
+            break
+
+        key_name, is_down = item
+        _safe_call("key event", controller.on_key_event, key_name, is_down)
+
+        # A burst of typing must not turn into a burst of watchdog checks.
+        if clock() >= next_tick:
+            _safe_call("watchdog tick", controller.tick)
+            next_tick = clock() + tick_interval_s
+
+
+def run_set_hotkey(
+    capture: Callable[[], HotkeySpec],
+    config_path: Path = CONFIG_PATH,
+    attempts: int = 3,
+) -> int:
+    """Capture a hotkey, validate it, and save it. Returns a process exit code.
+
+    `capture` is injected so this is testable without a keyboard; main() passes
+    hotkey_win.capture_hotkey. config.json is only touched on success - a refused
+    key leaves the file exactly as it was.
+    """
+    for attempt in range(1, attempts + 1):
+        print("Hold the key or combo you want, then release it.")
+        try:
+            spec = capture()
+        except HotkeyError as error:
+            print("That will not work as a hotkey: %s" % error, file=sys.stderr)
+            if attempt < attempts:
+                print("Try a different key.\n", file=sys.stderr)
+            continue
+        except TimeoutError as error:
+            # capture_hotkey's other documented failure (Task 6's contract).
+            # Not retried: a timeout means nobody is at the keyboard, so asking
+            # twice more just makes them wait another 30 seconds for the same
+            # answer. Uncaught it would end --set-hotkey in a stack trace.
+            print("%s" % error, file=sys.stderr)
+            break
+
+        cfg = load_config(config_path)
+        # Store the raw key names, not str(spec)'s display form: sorted key names
+        # are deterministic and are exactly what parse_hotkey expects to read back.
+        cfg["hotkey"] = "+".join(sorted(spec.keys))
+        save_config(cfg, config_path)
+
+        print("Hotkey set to %s - saved to %s" % (spec, config_path))
+        print("Restart Vocal Advantage for the new hotkey to take effect.")
+        return 0
+
+    print("Hotkey unchanged.", file=sys.stderr)
+    return 1
+
+
+def run_app(config_path: Path = CONFIG_PATH) -> int:
+    """Build the object graph, start the threads, and hand the main thread to tk."""
+    # These imports are function-local on purpose. tkinter, sounddevice and the
+    # keyboard hook are all real hardware/OS bindings; keeping them out of module
+    # scope means `import vocal_advantage.main` stays cheap and testable, and it
+    # makes it structurally impossible to accidentally import the model stack
+    # before import_transcriber_class() has run prepare().
+    import tkinter as tk
+
+    from vocal_advantage import paste_win
+    from vocal_advantage.hotkey_win import HotkeyListener
+    from vocal_advantage.indicator_win import Indicator, set_dpi_awareness
+    from vocal_advantage.recorder import Recorder
+
+    cfg = load_config(config_path)
+    # load_config already warned and substituted the default if this was garbage,
+    # so this parse cannot raise.
+    spec = parse_hotkey(cfg["hotkey"])
+    print("Hotkey: %s" % spec)
+
+    # MUST be before tk.Tk(). Windows fixes a process's DPI awareness when that
+    # process creates its first window; called afterwards this is a silent no-op
+    # answering E_ACCESSDENIED, the pill renders blurry on a scaled display, and
+    # the "bottom centre of the screen" pixel maths is wrong above 100% scaling.
+    # indicator_win deliberately never calls it for us, so this is the single
+    # production call site (Task 8's contract) - keep it directly above tk.Tk().
+    set_dpi_awareness()
+
+    # tkinter owns the main thread. The root itself is never shown - the only
+    # visible window is the Toplevel the Indicator makes for itself.
+    root = tk.Tk()
+    root.withdraw()
+    indicator = Indicator(root)
+
+    print(
+        "Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"])
+    )
+    print("(First run only: this downloads about 1.6 GB to your user cache.)")
+    transcriber_cls = import_transcriber_class()
+    transcriber = transcriber_cls(
+        model_name=cfg["model"],
+        device=cfg["device"],
+        language=cfg["language"],
+        min_duration_s=float(cfg["min_duration_s"]),
+    )
+    # The first transcribe() pays 1-3s of CUDA init. Paying it now, at startup,
+    # is what makes the first real dictation as fast as the tenth.
+    transcriber.warm_up()
+    print("Model ready.")
+
+    recorder = Recorder()
+    controller = DictationController(
+        hotkey=spec,
+        recorder=recorder,
+        transcriber=transcriber,
+        # The paste_win module itself satisfies the paster protocol: it exposes a
+        # module-level paste_text(str) -> bool, which is the whole interface.
+        paster=paste_win,
+        indicator=indicator,
+        min_duration_s=float(cfg["min_duration_s"]),
+        max_duration_s=float(cfg["max_duration_s"]),
+    )
+
+    events: "queue.Queue" = queue.Queue()
+    stop_event = threading.Event()
+    worker = threading.Thread(
+        target=controller_loop,
+        args=(controller, events, stop_event),
+        name="vocal-advantage-controller",
+        daemon=True,
+    )
+    worker.start()
+
+    def on_key(key_name: str, is_down: bool) -> None:
+        # Runs on the keyboard hook's thread. It must do nothing but enqueue -
+        # any real work here would block Windows' low-level keyboard hook.
+        events.put((key_name, is_down))
+
+    listener = HotkeyListener(spec, on_key)
+    listener.start()
+
+    shutting_down = threading.Event()
+
+    def shutdown() -> None:
+        if shutting_down.is_set():
+            return
+        shutting_down.set()
+        print("Shutting down ...")
+
+        _safe_call("hotkey listener stop", listener.stop)
+        try:
+            import keyboard
+
+            keyboard.unhook_all()  # belt and braces: nothing may still see keys
+        except Exception:  # noqa: BLE001
+            pass
+
+        stop_event.set()
+        events.put(None)  # unblock the loop if it is sitting in get()
+        worker.join(timeout=5.0)
+
+        try:
+            if recorder.is_recording:
+                recorder.stop()  # closes the stream so the Windows mic light goes out
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+        _safe_call("indicator hide", indicator.hide)
+        root.quit()
+
+    root.protocol("WM_DELETE_WINDOW", shutdown)
+
+    def heartbeat() -> None:
+        # A repeating tk callback is what lets Ctrl+C in the console interrupt
+        # mainloop at all: Python only runs signal handlers between bytecodes,
+        # and mainloop otherwise blocks inside Tcl.
+        if not worker.is_alive() and not shutting_down.is_set():
+            print("Controller thread stopped unexpectedly.", file=sys.stderr)
+            shutdown()
+            return
+        root.after(HEARTBEAT_MS, heartbeat)
+
+    # Indicator.pump re-arms itself with root.after; this just starts it.
+    root.after(UI_PUMP_MS, indicator.pump)
+    root.after(HEARTBEAT_MS, heartbeat)
+
+    print("Ready. Hold %s and speak. Close this console window to quit." % spec)
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        print("")
+    finally:
+        shutdown()
+        try:
+            root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    global _INSTANCE_LOCK
+
+    # --version and --help exit inside parse_args, before the mutex, so they
+    # still work while the app is running.
+    args = build_parser().parse_args(argv)
+
+    lock = acquire_single_instance_lock()
+    if lock is None:
+        print(
+            "Vocal Advantage is already running. Close the other window first.",
+            file=sys.stderr,
+        )
+        return 1
+    _INSTANCE_LOCK = lock
+
+    if args.set_hotkey:
+        # --set-hotkey installs its own keyboard hook, so it must not run
+        # alongside the app; holding the same mutex is what prevents that.
+        from vocal_advantage.hotkey_win import capture_hotkey
+
+        return run_set_hotkey(capture_hotkey, CONFIG_PATH)
+
+    return run_app(CONFIG_PATH)
