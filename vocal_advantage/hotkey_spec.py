@@ -8,6 +8,7 @@ or several joined by ``+``").
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 
 from . import _key_names
@@ -163,16 +164,24 @@ def _canonical(cleaned: str, original: str) -> str:
     tables and needs root on Linux/macOS, and modules that only want
     ``HotkeySpec`` (the controller, the config loader) must stay importable.
 
-    On macOS the library raises at import time unless the process is root, so
-    there the vendored name table in ``_key_names`` answers instead. That keeps
-    the portable half of the project -- this module, the config loader and the
+    Off Windows the vendored name table in ``_key_names`` answers instead, and
+    the library is never imported at all. This is not politeness about an
+    unsupported platform: ``keyboard``'s macOS backend runs a Carbon
+    ``CFDataGetBytes`` with an invalid range at module scope, which trips a
+    CoreFoundation assertion and raises SIGABRT. The process dies with exit
+    134 and no Python exception is raised, so a ``try``/``except`` around the
+    import buys nothing -- the guard has to come first. That keeps the
+    portable half of the project -- this module, the config loader and the
     controller -- fully testable on a Mac, which is where the recorder and the
     state machine get built. Windows always takes the live-library path.
     """
+    if sys.platform != "win32":
+        return _canonical_from_table(cleaned, original)
+
     try:
         import keyboard
     except Exception:
-        # macOS without root, or any platform the library will not load on.
+        # Any platform the library will not load on.
         return _canonical_from_table(cleaned, original)
 
     name = keyboard.normalize_name(cleaned)

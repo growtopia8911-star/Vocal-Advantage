@@ -12,13 +12,20 @@ import pytest
 
 from vocal_advantage import cuda_dlls
 
+# The pre-existing PATH entry that prepare() must prepend in front of. It has
+# to be spelled for the host platform, because it must not itself contain
+# os.pathsep: on macOS that separator is ":", so the Windows literal
+# "C:\Windows\system32" splits into two entries and every "we kept the old
+# PATH" assertion below reads wrong. cuda_dlls itself is already pathsep-neutral.
+EXISTING_PATH_ENTRY = r"C:\Windows\system32" if os.name == "nt" else "/usr/bin"
+
 
 @pytest.fixture(autouse=True)
 def fresh_module_state(monkeypatch):
     """prepare() is a once-per-process side effect; give each test a clean slate."""
     monkeypatch.setattr(cuda_dlls, "_prepared", False)
     monkeypatch.setattr(cuda_dlls, "_dll_directory_handles", [])
-    monkeypatch.setenv("PATH", r"C:\Windows\system32")
+    monkeypatch.setenv("PATH", EXISTING_PATH_ENTRY)
     monkeypatch.delenv("KMP_DUPLICATE_LIB_OK", raising=False)
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
 
@@ -90,7 +97,7 @@ def test_prepare_prepends_both_dirs_to_path_without_losing_the_old_path(
     cublas = str(fake_site_packages / "nvidia" / "cublas" / "bin")
     cudnn = str(fake_site_packages / "nvidia" / "cudnn" / "bin")
     assert set(entries[:2]) == {cublas, cudnn}
-    assert entries[2] == r"C:\Windows\system32"
+    assert entries[2] == EXISTING_PATH_ENTRY
 
 
 def test_prepare_is_a_no_op_the_second_time(fake_site_packages, added_dirs):
@@ -128,7 +135,7 @@ def test_prepare_does_not_raise_on_a_machine_with_no_nvidia_wheels(
 
     assert added_dirs == []
     assert os.environ["KMP_DUPLICATE_LIB_OK"] == "TRUE"
-    assert path_entries() == [r"C:\Windows\system32"]
+    assert path_entries() == [EXISTING_PATH_ENTRY]
 
 
 def test_prepare_survives_a_platform_without_add_dll_directory(

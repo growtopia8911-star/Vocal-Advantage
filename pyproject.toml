@@ -18,13 +18,19 @@ requires-python = ">=3.12"
 # the portable modules (recorder, controller, config, hotkey_spec,
 # transcriber) can be worked on there. On Windows the resolved set is
 # unchanged.
+#
+# `keyboard` is marked the same way for a sharper reason: it *does* install on
+# macOS (dragging in all of pyobjc), and then `import keyboard` aborts the
+# interpreter -- its Carbon CFDataGetBytes call trips a CoreFoundation
+# assertion and raises SIGABRT, exit 134, uncatchable. Leaving it installed on
+# a Mac makes the whole test suite die on first contact.
 dependencies = [
     "faster-whisper==1.2.1",
     "ctranslate2==4.8.1",
     "nvidia-cublas-cu12; sys_platform == 'win32'",
     "nvidia-cudnn-cu12==9.*; sys_platform == 'win32'",
     "sounddevice==0.5.6",
-    "keyboard==0.13.5",
+    "keyboard==0.13.5; sys_platform == 'win32'",
     "pywin32; sys_platform == 'win32'",
     "numpy",
 ]

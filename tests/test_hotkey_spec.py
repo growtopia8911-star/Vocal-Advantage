@@ -301,3 +301,35 @@ def test_parsing_does_not_start_a_keyboard_hook():
     parse_hotkey("ctrl+win")
     assert keyboard._listener.listening is False
     assert {t.name for t in threading.enumerate()} == before
+
+
+def test_canonical_does_not_import_keyboard_off_windows(monkeypatch):
+    """On macOS `import keyboard` kills the interpreter, so never attempt it.
+
+    `keyboard/_darwinkeyboard.py` runs a Carbon `CFDataGetBytes` with an
+    invalid range at module scope. That trips a CoreFoundation assertion and
+    raises SIGABRT -- the process dies with exit 134 and no Python exception is
+    raised at all, so `_canonical`'s `try/except` cannot catch it. Guarding on
+    the platform is the only defence; "the library is absent" (which the
+    vendored-fallback test simulates) is a different failure entirely.
+    """
+    import builtins
+    import sys
+
+    from vocal_advantage import hotkey_spec
+
+    attempted = []
+    real_import = builtins.__import__
+
+    def record(name, *args, **kwargs):
+        if name == "keyboard":
+            attempted.append(name)
+            # Stands in for the abort, which the test process cannot survive.
+            raise ImportError("blocked: importing keyboard would abort here")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(builtins, "__import__", record)
+
+    assert hotkey_spec._canonical("ctrl", "ctrl") == "ctrl"
+    assert attempted == [], "must not import `keyboard` on a non-Windows platform"
