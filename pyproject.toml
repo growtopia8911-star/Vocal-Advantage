@@ -30,6 +30,10 @@ packages = ["vocal_advantage"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: needs the real 1.6 GB model and a GPU; deselected by default, run with `pytest -m slow`",
+]
+addopts = ["-m", "not slow"]
 # Puts the repo root on sys.path so `import vocal_advantage` resolves to the
 # working tree even if someone runs pytest without installing the package.
 # A later task adds `markers` and `addopts` to this section. Those are
