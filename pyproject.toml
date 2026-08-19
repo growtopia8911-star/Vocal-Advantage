@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vocal-advantage"
+version = "0.1.0"
+description = "Local hold-to-talk dictation for Windows. Audio never leaves the machine."
+requires-python = ">=3.12"
+
+# Pins copied verbatim from SPEC.md ("Pinned deps"). Where the spec gives no
+# version (nvidia-cublas-cu12, pywin32, numpy) none is invented here.
+# Deliberately absent: torch. The spec forbids it in this venv.
+dependencies = [
+    "faster-whisper==1.2.1",
+    "ctranslate2==4.8.1",
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12==9.*",
+    "sounddevice==0.5.6",
+    "keyboard==0.13.5",
+    "pywin32",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools]
+packages = ["vocal_advantage"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Puts the repo root on sys.path so `import vocal_advantage` resolves to the
+# working tree even if someone runs pytest without installing the package.
+# A later task adds `markers` and `addopts` to this section. Those are
+# additions: the two keys below must stay, or every test fails at collection
+# with ModuleNotFoundError: No module named 'vocal_advantage'.
+pythonpath = ["."]
