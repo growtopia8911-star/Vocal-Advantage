@@ -213,6 +213,78 @@ def test_modifiers_matches_the_keyboard_library():
     assert MODIFIERS == frozenset(keyboard.all_modifiers)
 
 
+def test_vendored_key_table_matches_the_live_library():
+    """The committed table is generated from the library; catch any drift.
+
+    macOS cannot import `keyboard` without root, so `_canonical` falls back to
+    `_key_names`. This test only runs where the real library is available --
+    i.e. Windows -- and is what stops the Mac being handed a stale table if the
+    pinned `keyboard` version is ever bumped.
+    """
+    keyboard = pytest.importorskip("keyboard")
+    import keyboard._canonical_names as canonical_names
+
+    from vocal_advantage import _key_names
+
+    # Same candidate set the generator uses. The OS layout matters: real keys
+    # like "f8" and "right alt" have no alias entry, so walking the alias
+    # table alone would miss them (it did, the first time).
+    keyboard._os_keyboard.init()
+    candidates = set(canonical_names.canonical_names.values())
+    candidates |= set(canonical_names.canonical_names)
+    candidates |= set(keyboard._os_keyboard.from_name)
+
+    live_valid = set()
+    for name in candidates:
+        try:
+            keyboard.key_to_scan_codes(name)
+        except Exception:
+            continue
+        live_valid.add(name)
+
+    assert _key_names.VALID_NAMES == frozenset(live_valid)
+    for alias, target in _key_names.ALIASES.items():
+        assert keyboard.normalize_name(alias) == target
+
+
+@pytest.mark.parametrize(
+    "text", [t for t, _ in ACCEPTED] + ["nonsense", "f27", "ctrl+nonsense"]
+)
+def test_the_vendored_fallback_agrees_with_the_live_library(text, monkeypatch):
+    """Parsing must give the same answer on a Mac as it does here.
+
+    Forces the no-library path by making `import keyboard` fail exactly the way
+    it does on macOS, then checks the result matches the live-library result --
+    accepted keys canonicalise identically, rejected ones stay rejected.
+    """
+    from vocal_advantage import hotkey_spec
+
+    def live():
+        try:
+            return parse_hotkey(text).keys
+        except HotkeyError:
+            return "rejected"
+
+    expected = live()
+
+    real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+    def no_keyboard(name, *args, **kwargs):
+        if name == "keyboard":
+            raise ImportError("You must be root to use this library on mac.")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", no_keyboard)
+    assert hotkey_spec._canonical_from_table is not None  # path actually exists
+
+    try:
+        actual = parse_hotkey(text).keys
+    except HotkeyError:
+        actual = "rejected"
+
+    assert actual == expected
+
+
 def test_parsing_does_not_start_a_keyboard_hook():
     """SPEC never suppresses keys; a hook installed by a *parse* would be a
     surprise, and would make the test suite grab global keyboard input.

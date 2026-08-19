@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from . import _key_names
+
 
 class HotkeyError(ValueError):
     """A hotkey string we refuse to use. The message is shown to the user."""
@@ -160,20 +162,47 @@ def _canonical(cleaned: str, original: str) -> str:
     import is deliberately lazy -- importing ``keyboard`` builds Win32 key
     tables and needs root on Linux/macOS, and modules that only want
     ``HotkeySpec`` (the controller, the config loader) must stay importable.
+
+    On macOS the library raises at import time unless the process is root, so
+    there the vendored name table in ``_key_names`` answers instead. That keeps
+    the portable half of the project -- this module, the config loader and the
+    controller -- fully testable on a Mac, which is where the recorder and the
+    state machine get built. Windows always takes the live-library path.
     """
-    import keyboard
+    try:
+        import keyboard
+    except Exception:
+        # macOS without root, or any platform the library will not load on.
+        return _canonical_from_table(cleaned, original)
 
     name = keyboard.normalize_name(cleaned)
     try:
         keyboard.key_to_scan_codes(name)
     except ValueError as exc:
-        where = "" if cleaned == original.strip().lower() else f" (in {original!r})"
-        raise HotkeyError(
-            f"{cleaned!r} is not a key name this app knows{where}. Run "
-            "'python -m vocal_advantage --set-hotkey' and press the key you want "
-            "instead of typing its name."
-        ) from exc
+        raise _unknown_key_error(cleaned, original) from exc
     return name
+
+
+def _canonical_from_table(cleaned: str, original: str) -> str:
+    """``_canonical`` without the library, using the vendored name table.
+
+    Mirrors ``keyboard.normalize_name``: underscores become spaces, then the
+    alias map has the last word ("win" -> "windows", "capslock" -> "caps lock").
+    """
+    name = " ".join(cleaned.replace("_", " ").split())
+    name = _key_names.ALIASES.get(name, name)
+    if name not in _key_names.VALID_NAMES:
+        raise _unknown_key_error(cleaned, original)
+    return name
+
+
+def _unknown_key_error(cleaned: str, original: str) -> HotkeyError:
+    where = "" if cleaned == original.strip().lower() else f" (in {original!r})"
+    return HotkeyError(
+        f"{cleaned!r} is not a key name this app knows{where}. Run "
+        "'python -m vocal_advantage --set-hotkey' and press the key you want "
+        "instead of typing its name."
+    )
 
 
 def parse_hotkey(text: str) -> HotkeySpec:
