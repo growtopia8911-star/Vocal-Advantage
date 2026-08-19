@@ -11,14 +11,21 @@ requires-python = ">=3.12"
 # Pins copied verbatim from SPEC.md ("Pinned deps"). Where the spec gives no
 # version (nvidia-cublas-cu12, pywin32, numpy) none is invented here.
 # Deliberately absent: torch. The spec forbids it in this venv.
+#
+# The sys_platform markers are not in the spec and are not a change of plan:
+# pywin32 and the two NVIDIA CUDA wheels publish no macOS build at all, so
+# without them `pip install -e ".[dev]"` fails outright on a Mac and none of
+# the portable modules (recorder, controller, config, hotkey_spec,
+# transcriber) can be worked on there. On Windows the resolved set is
+# unchanged.
 dependencies = [
     "faster-whisper==1.2.1",
     "ctranslate2==4.8.1",
-    "nvidia-cublas-cu12",
-    "nvidia-cudnn-cu12==9.*",
+    "nvidia-cublas-cu12; sys_platform == 'win32'",
+    "nvidia-cudnn-cu12==9.*; sys_platform == 'win32'",
     "sounddevice==0.5.6",
     "keyboard==0.13.5",
-    "pywin32",
+    "pywin32; sys_platform == 'win32'",
     "numpy",
 ]
 
