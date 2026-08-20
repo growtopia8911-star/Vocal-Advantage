@@ -20,6 +20,7 @@ import queue
 import subprocess
 import sys
 import threading
+from unittest import mock
 from pathlib import Path
 
 import numpy as np
@@ -1138,3 +1139,117 @@ def test_quit_on_mac_stops_the_run_loop_so_the_process_can_exit(monkeypatch):
     va_main._quit_mac(lambda: order.append("shutdown"))()
 
     assert order == ["shutdown", "stop loop"]
+
+
+# --------------------------------------------------------------------------
+# The personal dictionary, wired into the cleaning chain
+# --------------------------------------------------------------------------
+
+
+class _Dict:
+    """Stands in for dictionary.Dictionary."""
+
+    def __init__(self, fixes=None, words=None):
+        self.fixes = fixes or {}
+        self.words = words or []
+        self.hotwords = ", ".join(self.words)
+
+    def __bool__(self):
+        return bool(self.fixes or self.words)
+
+    def apply(self, text):
+        for wrong, right in self.fixes.items():
+            text = text.replace(wrong, right)
+        return text
+
+
+def test_no_dictionary_leaves_the_cleaner_exactly_as_it_was():
+    cfg = {"clean_speech": False, "ai_cleanup": False}
+    assert va_main._cleaner(cfg, None)("um so kelvin") == "um so kelvin"
+
+
+def test_the_dictionary_corrects_the_text():
+    cfg = {"clean_speech": False, "ai_cleanup": False}
+    clean = va_main._cleaner(cfg, _Dict({"kelvin": "Kevin"}))
+    assert clean("send it to kelvin") == "send it to Kevin"
+
+
+def test_corrections_apply_even_with_cleaning_switched_off():
+    # "Give me the raw transcript" is a request about fillers and stutters,
+    # not permission to keep spelling a name wrong.
+    cfg = {"clean_speech": False, "ai_cleanup": False}
+    clean = va_main._cleaner(cfg, _Dict({"kelvin": "Kevin"}))
+    assert "Kevin" in clean("um, kelvin")
+
+
+def test_corrections_run_after_the_cleanup_pass_not_before():
+    """The ordering that matters, and the reason it is not the other way round.
+
+    A cleanup pass rewrites whole sentences. Correcting first would let it put
+    the mistake back, and the fix would look like it had never happened.
+    """
+    order = []
+
+    def fake_clean(text):
+        order.append("cleanup")
+        return text
+
+    dictionary = _Dict({"kelvin": "Kevin"})
+    real_apply = dictionary.apply
+
+    def watched_apply(text):
+        order.append("dictionary")
+        return real_apply(text)
+
+    dictionary.apply = watched_apply
+
+    cfg = {"clean_speech": True, "ai_cleanup": False}
+    with mock.patch.object(va_main, "clean_speech", fake_clean):
+        va_main._cleaner(cfg, dictionary)("kelvin")
+
+    assert order == ["cleanup", "dictionary"]
+
+
+def test_an_ai_pass_cannot_undo_a_correction():
+    # The concrete version of the test above: a model that "helpfully" spells
+    # the name the way it heard it must not get the last word.
+    cfg = {"clean_speech": True, "ai_cleanup": True}
+    dictionary = _Dict({"Kelvin": "Kevin"})
+    with mock.patch.object(va_main, "ai_clean", lambda text: "Tell Kelvin."):
+        assert va_main._cleaner(cfg, dictionary)("tell kevin") == "Tell Kevin."
+
+
+def test_an_empty_dictionary_does_not_wrap_the_cleaner():
+    # Falsey dictionaries are skipped entirely, so an empty dictionary.json
+    # costs nothing per dictation.
+    cfg = {"clean_speech": False, "ai_cleanup": False}
+    assert va_main._cleaner(cfg, _Dict()) is not None
+    assert va_main._cleaner(cfg, _Dict())("kelvin") == "kelvin"
+
+
+def test_loading_a_dictionary_reports_what_it_found(tmp_path, capsys):
+    path = tmp_path / "dictionary.json"
+    path.write_text(
+        '{"words": ["Obsidian"], "fixes": {"kelvin": "Kevin"}}', encoding="utf-8"
+    )
+    loaded = va_main._load_dictionary(path)
+    assert loaded.hotwords == "Obsidian"
+    assert "1 word" in capsys.readouterr().out
+
+
+def test_an_empty_dictionary_says_nothing(tmp_path, capsys):
+    va_main._load_dictionary(tmp_path / "dictionary.json")
+    assert "dictionary" not in capsys.readouterr().out.lower()
+
+
+def test_a_dictionary_that_explodes_never_stops_the_app(tmp_path, capsys):
+    def explode(_path):
+        raise RuntimeError("disk on fire")
+
+    with mock.patch.object(va_main, "load_dictionary", explode):
+        loaded = va_main._load_dictionary(tmp_path / "dictionary.json")
+
+    assert not loaded
+    assert loaded.apply("kelvin") == "kelvin"
+    assert loaded.hotwords == ""
+    assert "carrying on without it" in capsys.readouterr().err

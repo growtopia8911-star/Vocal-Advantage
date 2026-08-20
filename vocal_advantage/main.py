@@ -29,6 +29,7 @@ from vocal_advantage.config import CONFIG_PATH, load_config, save_config
 # console.py so config.py can use it without an import cycle.
 from vocal_advantage.console import say, warn
 from vocal_advantage.controller import DictationController
+from vocal_advantage.dictionary import DICTIONARY_PATH, load_dictionary
 from vocal_advantage.hotkey_spec import HotkeyError, HotkeySpec, parse_hotkey
 from vocal_advantage.cleanup import ai_clean, clean_speech, warm_up_model
 from vocal_advantage.streaming import StreamingTranscript
@@ -125,17 +126,31 @@ class NarratingTranscriber:
         return text
 
 
-def _cleaner(cfg: dict):
+def _cleaner(cfg: dict, dictionary=None):
     """The text-to-text callable both platforms take, chosen by config.
 
     clean_speech=false wins over ai_cleanup=true: asking for the raw
     transcript and then running it through a model would be a contradiction.
+
+    The personal dictionary's fixes run **last**, after whichever cleanup was
+    chosen and even when cleaning is off entirely. Two reasons, and both matter:
+
+    * A correction is not cleanup. Asking for the raw transcript is a request
+      about fillers and stutters, not permission to keep spelling your name
+      wrong.
+    * The AI pass rewrites whole sentences. Fixing first would let it put
+      "Kelvin" back, and the correction would look like it had never happened.
     """
     if not cfg.get("clean_speech", True):
-        return lambda text: text
-    if cfg.get("ai_cleanup", False):
-        return ai_clean
-    return clean_speech
+        base = lambda text: text  # noqa: E731 - the identity, deliberately
+    elif cfg.get("ai_cleanup", False):
+        base = ai_clean
+    else:
+        base = clean_speech
+
+    if not dictionary:
+        return base
+    return lambda text: dictionary.apply(base(text))
 
 
 def _warm_up_ai_cleanup(cfg: dict) -> None:
@@ -476,6 +491,40 @@ def run_set_hotkey(
     return 1
 
 
+def _load_dictionary(path: Path = DICTIONARY_PATH):
+    """The personal dictionary, or an empty one. Never raises, and says so.
+
+    An accuracy aid: losing it costs accuracy, never the product.
+    """
+    try:
+        dictionary = load_dictionary(path)
+    except Exception:  # noqa: BLE001 - load_dictionary already guards, belt too
+        warn("The personal dictionary could not be loaded; carrying on without it.")
+        warn(traceback.format_exc())
+        return _EmptyDictionary()
+
+    if dictionary:
+        say(
+            "Personal dictionary: %d word(s) to listen for, %d fix(es)."
+            % (len(dictionary.words), len(dictionary.fixes))
+        )
+    return dictionary
+
+
+class _EmptyDictionary:
+    """Stands in when even the guarded loader failed. Does nothing, safely."""
+
+    words: list = []
+    fixes: dict = {}
+    hotwords = ""
+
+    def __bool__(self) -> bool:
+        return False
+
+    def apply(self, text: str) -> str:
+        return text
+
+
 def _make_flow_bar(cfg: dict, indicator):
     """The overlay, or None if it is switched off or refuses to start.
 
@@ -635,6 +684,8 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     # microphone stream anywhere in this project.
     indicator = Indicator(level_source=lambda: recorder.level)
 
+    dictionary = _load_dictionary()
+
     say("Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"]))
     transcriber_cls = import_transcriber_class()
     transcriber = transcriber_cls(
@@ -642,6 +693,7 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
         device=cfg["device"],
         language=cfg["language"],
         min_duration_s=float(cfg["min_duration_s"]),
+        hotwords=dictionary.hotwords,
     )
     # The first transcribe() pays 1-3s of CUDA init. Paying it now is what
     # makes the first real dictation as fast as the tenth.
@@ -655,7 +707,7 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
         transcriber=transcriber,
         # paste_win itself satisfies the paster protocol: a module-level
         # paste_text(str) -> bool is the whole interface.
-        paster=CleaningPaster(paste_win, clean=_cleaner(cfg)),
+        paster=CleaningPaster(paste_win, clean=_cleaner(cfg, dictionary)),
         indicator=indicator,
         min_duration_s=float(cfg["min_duration_s"]),
         max_duration_s=float(cfg["max_duration_s"]),
@@ -773,6 +825,8 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     # microphone stream.
     indicator = Indicator(level_source=lambda: recorder.level)
 
+    dictionary = _load_dictionary()
+
     say("Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"]))
     transcriber_cls = import_transcriber_class()
     transcriber = transcriber_cls(
@@ -780,6 +834,7 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         device=cfg["device"],
         language=cfg["language"],
         min_duration_s=float(cfg["min_duration_s"]),
+        hotwords=dictionary.hotwords,
     )
     transcriber.warm_up()
     say("Model ready.")
@@ -792,7 +847,7 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         transcriber=transcriber,
         type_partial=paste_mac.type_partial,
         type_final=paste_mac.paste_text,
-        clean=_cleaner(cfg),
+        clean=_cleaner(cfg, dictionary),
     )
     controller = DictationController(
         hotkey=spec,

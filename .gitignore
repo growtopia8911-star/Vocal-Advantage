@@ -2,6 +2,8 @@
 
 # per-machine settings
 config.json
+# personal: names and jargon you dictate
+dictionary.json
 
 # python
 .venv/

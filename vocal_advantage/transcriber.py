@@ -139,11 +139,19 @@ class Transcriber:
         device: str,
         language: str,
         min_duration_s: float,
+        hotwords: str = "",
     ) -> None:
         self.model_name = model_name
         self.device = device
         self.language = language
         self.min_duration_s = min_duration_s
+        #: Names and jargon from the personal dictionary, nudging Whisper
+        #: toward hearing them. Empty means "no hotwords", which is what
+        #: faster-whisper documents. Applied before transcription, so nothing
+        #: is rewritten afterwards and a word you really said is never
+        #: corrupted -- unlike the fixes pass, which is the fallback for what
+        #: this misses.
+        self.hotwords = hotwords or ""
         self.device_in_use: str | None = None
         self.compute_type_in_use: str | None = None
         self._model = None
@@ -220,7 +228,7 @@ class Transcriber:
     # -- transcription ------------------------------------------------------
 
     def _transcribe_kwargs(self) -> dict:
-        return {
+        kwargs = {
             "language": self.language,
             # beam 1 matched beam 5 on LocalFlow's dictation WER benchmark.
             "beam_size": 1,
@@ -234,6 +242,13 @@ class Transcriber:
             "condition_on_previous_text": False,
             "without_timestamps": True,
         }
+        if self.hotwords:
+            # Only when there is something to say: passing "" is harmless but
+            # passing the key at all on an older faster-whisper would not be,
+            # and this keeps the kwargs identical to before for anyone with an
+            # empty dictionary.
+            kwargs["hotwords"] = self.hotwords
+        return kwargs
 
     def _run(self, audio: np.ndarray) -> str:
         model = self._ensure_model()
