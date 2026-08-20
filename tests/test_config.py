@@ -60,6 +60,7 @@ def test_defaults_has_exactly_the_spec_keys():
         "clean_speech",
         "flow_bar",
         "flow_bar_position",
+        "flow_bar_point",
         "ai_cleanup",
     }
 
@@ -297,3 +298,41 @@ def test_a_bad_position_does_not_stop_the_app_starting(tmp_path):
     )
     cfg = load_config(path)
     assert cfg["hotkey"] == "right alt"
+
+
+def test_the_dragged_point_defaults_to_none(tmp_path):
+    # None is the normal state: it means "use flow_bar_position".
+    assert DEFAULTS["flow_bar_point"] is None
+    assert load_config(tmp_path / "config.json")["flow_bar_point"] is None
+
+
+def test_a_dragged_point_is_read_back(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"flow_bar_point": [640, 120]}', encoding="utf-8")
+    assert load_config(path)["flow_bar_point"] == [640.0, 120.0]
+
+
+def test_a_dragged_point_accepts_floats(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"flow_bar_point": [640.5, 120.25]}', encoding="utf-8")
+    assert load_config(path)["flow_bar_point"] == [640.5, 120.25]
+
+
+@pytest.mark.parametrize(
+    "bad", ['"middle"', "[1]", "[1, 2, 3]", '[1, "x"]', "42", "[true, false]"]
+)
+def test_a_bad_point_warns_and_falls_back(tmp_path, capsys, bad):
+    # [true, false] is the sharp one: bool is an int subclass, so a naive
+    # isinstance check reads it as a perfectly good coordinate pair.
+    path = tmp_path / "config.json"
+    path.write_text(f'{{"flow_bar_point": {bad}}}', encoding="utf-8")
+    assert load_config(path)["flow_bar_point"] is None
+    assert capsys.readouterr().err != ""
+
+
+def test_a_bad_point_does_not_stop_the_app_starting(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"hotkey": "right alt", "flow_bar_point": "nope"}', encoding="utf-8"
+    )
+    assert load_config(path)["hotkey"] == "right alt"

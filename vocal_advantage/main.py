@@ -491,7 +491,11 @@ def _make_flow_bar(cfg: dict, indicator):
         else:
             from vocal_advantage.flowbar_win import FlowBar
 
-        bar = FlowBar(indicator, position=cfg["flow_bar_position"])
+        bar = FlowBar(
+            indicator,
+            position=cfg["flow_bar_position"],
+            point=cfg["flow_bar_point"],
+        )
         bar.open()
         return bar
     except Exception:  # noqa: BLE001 - decoration must never stop dictation
@@ -501,7 +505,12 @@ def _make_flow_bar(cfg: dict, indicator):
         return None
 
 
-def _make_tray(indicator, on_quit: Callable[[], None]):
+def _make_tray(
+    indicator,
+    on_quit: Callable[[], None],
+    on_toggle_move: Callable[[], None] | None = None,
+    is_movable: Callable[[], bool] | None = None,
+):
     """The tray / menu-bar icon, or None if it refuses to start. Never raises."""
     try:
         if sys.platform == "darwin":
@@ -509,12 +518,61 @@ def _make_tray(indicator, on_quit: Callable[[], None]):
         else:
             from vocal_advantage.tray_win import TrayIcon
 
-        return TrayIcon(indicator, on_quit)
+        return TrayIcon(indicator, on_quit, on_toggle_move, is_movable)
     except Exception:  # noqa: BLE001 - as above
         warn("The tray icon could not be created.")
         warn("Dictation and the hotkey are unaffected; press Ctrl+C to quit.")
         warn(traceback.format_exc())
         return None
+
+
+def _save_flow_bar_point(bar, config_path: Path) -> None:
+    """Remember where the bar was dragged to, so it is there next launch.
+
+    Re-reads config.json rather than writing back the dict the app started
+    with: the file is documented as hand-editable, and a session that has been
+    running for hours would otherwise silently revert every edit made to it in
+    the meantime.
+    """
+    if bar is None:
+        return
+    try:
+        point = bar.current_point()
+        if point is None:
+            return
+        cfg = load_config(config_path)
+        cfg["flow_bar_point"] = point
+        save_config(cfg, config_path)
+        say("Bar position saved (%.0f, %.0f)." % (point[0], point[1]))
+    except Exception:  # noqa: BLE001 - never worth losing the session over
+        warn("Could not save the bar position.")
+        warn(traceback.format_exc())
+
+
+def _move_mode(bar, config_path: Path):
+    """The "Move bar" menu item: returns (toggle, is_movable).
+
+    Move mode and click-through are one setting, not two -- a window that
+    ignores mouse events never receives the mouse-down that starts a drag. So
+    turning this on genuinely does make the pill intercept clicks, which is why
+    it is an explicit menu item with a visible outline rather than something
+    always available.
+
+    Returns (None, None) when there is no bar, so the menu simply leaves the
+    item out instead of offering something that cannot work.
+    """
+    if bar is None:
+        return None, None
+
+    def toggle() -> None:
+        movable = not bar.movable
+        bar.set_movable(movable)
+        if movable:
+            say("Move bar: drag it, then choose Lock bar in place.")
+        else:
+            _save_flow_bar_point(bar, config_path)
+
+    return toggle, (lambda: bar.movable)
 
 
 def _stop_dictation(listener, recorder, worker, events, stop_event) -> None:
@@ -624,7 +682,8 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     # UI last: by here the hotkey already works, so anything below failing
     # costs decoration and never dictation.
     bar = _make_flow_bar(cfg, indicator)
-    tray = _make_tray(indicator, lambda: None)
+    toggle_move, is_movable = _move_mode(bar, config_path)
+    tray = _make_tray(indicator, lambda: None, toggle_move, is_movable)
 
     shutting_down = threading.Event()
 
@@ -633,6 +692,9 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
             return
         shutting_down.set()
         say("Shutting down ...")
+        # Quitting mid-drag should not throw the new position away.
+        if bar is not None and bar.movable:
+            _save_flow_bar_point(bar, config_path)
         _stop_dictation(listener, recorder, worker, events, stop_event)
         if bar is not None:
             _safe_call("flow bar close", bar.close)
@@ -782,7 +844,12 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         warn(traceback.format_exc())
 
     bar = _make_flow_bar(cfg, indicator) if app is not None else None
-    tray = _make_tray(indicator, lambda: None) if app is not None else None
+    toggle_move, is_movable = _move_mode(bar, config_path)
+    tray = (
+        _make_tray(indicator, lambda: None, toggle_move, is_movable)
+        if app is not None
+        else None
+    )
 
     shutting_down = threading.Event()
 
@@ -791,6 +858,9 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
             return
         shutting_down.set()
         say("Shutting down ...")
+        # Quitting mid-drag should not throw the new position away.
+        if bar is not None and bar.movable:
+            _save_flow_bar_point(bar, config_path)
         _stop_dictation(listener, recorder, worker, events, stop_event)
         if bar is not None:
             _safe_call("flow bar close", bar.close)

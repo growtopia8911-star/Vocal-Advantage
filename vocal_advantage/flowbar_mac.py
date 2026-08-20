@@ -75,16 +75,20 @@ NSApplicationActivationPolicyAccessory = 1
 NSTextAlignmentCenter = 2
 
 # --- palette ----------------------------------------------------------------
-#: A light ground inside a black outline, with black bars on it -- the reference
-#: look. A fill-less pill was tried first and is the more elegant idea, but on a
-#: real desktop a 1.5px black outline over arbitrary wallpaper is genuinely hard
-#: to find, and a bar you cannot see is not a quieter design, it is a broken one.
+#: A light ground with black bars on it, and NO outline. The edge of the fill is
+#: what defines the shape now, so the rounded ends come purely from the
+#: antialiased fill -- which is why the fill must never be drawn inset for a
+#: stroke that no longer exists, or the pill loses a pixel all the way round.
 #: Warm rather than pure white, so it reads as paper rather than a blown-out box.
 PILL_FILL_RGB = (0.97, 0.965, 0.945)
-#: Outline and bars share one colour, so the pill reads as a single drawn object.
-PILL_RGB = (0.0, 0.0, 0.0)
 BAR_RGB = (0.0, 0.0, 0.0)
-PILL_STROKE_WIDTH = 1.5
+
+#: Drawn only while "Move bar" is on. Not decoration: in that mode the pill
+#: stops being click-through and starts eating clicks, so it has to be
+#: unmistakable that the mode is on -- leaving it on by accident is the one real
+#: drawback of a menu toggle, and this is what stops it happening quietly.
+MOVE_OUTLINE_RGB = (0.15, 0.45, 0.95)
+MOVE_OUTLINE_WIDTH = 2.0
 
 FPS = 60
 SIDE_MARGIN = 24        # from the screen edge, for the left/right positions
@@ -102,6 +106,28 @@ def ensure_app() -> NSApplication:
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     return app
+
+
+def point_origin(point, width: float, height: float, visible_frame):
+    """Bottom-left corner for a dragged pill, clamped onto the visible screen.
+
+    ``point`` is (centre_x, bottom_y) -- the centre rather than the left edge,
+    so the pill grows evenly in both directions when it widens for a message
+    instead of walking sideways every time one appears.
+
+    The clamp is the point of this function. A saved position can name a
+    monitor that has since been unplugged, or a spot that is now under a Dock
+    that moved; without it the bar is simply invisible and there is nothing on
+    screen to drag it back with.
+    """
+    centre_x, bottom_y = float(point[0]), float(point[1])
+    x_min = visible_frame.origin.x
+    y_min = visible_frame.origin.y
+    x_max = x_min + visible_frame.size.width - width
+    y_max = y_min + visible_frame.size.height - height
+    x = min(max(centre_x - width / 2.0, x_min), max(x_min, x_max))
+    y = min(max(bottom_y, y_min), max(y_min, y_max))
+    return x, y
 
 
 def pill_origin(position: str, width: float, visible_frame):
@@ -136,6 +162,22 @@ class _FlowBarView(NSView):
     def setData_(self, data) -> None:
         self._data = data
 
+    def setMovable_(self, movable) -> None:
+        self._movable = bool(movable)
+
+    def mouseDown_(self, event) -> None:
+        """Start a native window drag.
+
+        Only ever reached while move mode is on: the rest of the time the panel
+        has ignoresMouseEvents set and no mouse event arrives here at all.
+
+        performWindowDragWithEvent_ hands the whole drag to AppKit, which is
+        both less code and better behaved than tracking mouseDragged_ by hand --
+        it gets screen edges and multiple displays right for free.
+        """
+        if getattr(self, "_movable", False):
+            self.window().performWindowDragWithEvent_(event)
+
     def isOpaque(self) -> bool:
         # False is the default, but saying so is what lets the rounded corners
         # show the desktop rather than a grey box.
@@ -149,38 +191,40 @@ class _FlowBarView(NSView):
         bounds = self.bounds()
         width = bounds.size.width
         height = bounds.size.height
+        radius = height / 2.0     # fully rounded ends, not a rounded rectangle
 
-        # Inset by half the stroke: a path stroked on the view's exact bounds
-        # loses its outer half to clipping and the outline comes out looking
-        # thinner at the top and bottom than at the sides.
-        inset = PILL_STROKE_WIDTH / 2.0
-        radius = (height - PILL_STROKE_WIDTH) / 2.0   # still fully rounded ends
-
-        pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            NSMakeRect(
-                inset, inset,
-                width - PILL_STROKE_WIDTH, height - PILL_STROKE_WIDTH,
-            ),
-            radius, radius,
-        )
-
+        # Fill only, drawn on the full bounds. With the outline gone there is
+        # nothing to inset for, and insetting anyway would shrink the pill.
         fill_red, fill_green, fill_blue = PILL_FILL_RGB
         NSColor.colorWithCalibratedRed_green_blue_alpha_(
             fill_red, fill_green, fill_blue, data.pill_alpha
         ).set()
-        pill.fill()
-
-        red, green, blue = PILL_RGB
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(
-            red, green, blue, data.pill_alpha
-        ).set()
-        pill.setLineWidth_(PILL_STROKE_WIDTH)
-        pill.stroke()
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(0, 0, width, height), radius, radius
+        ).fill()
 
         if data.bar_alpha > 0.01:
             self._draw_bars(data, width, height)
         if data.text and data.text_alpha > 0.01:
             self._draw_message(data, width, height)
+        if getattr(self, "_movable", False):
+            self._draw_move_outline(width, height)
+
+    def _draw_move_outline(self, width: float, height: float) -> None:
+        """Say loudly that clicks are being intercepted right now."""
+        inset = MOVE_OUTLINE_WIDTH / 2.0
+        red, green, blue = MOVE_OUTLINE_RGB
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(red, green, blue, 1.0).set()
+        outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(
+                inset, inset,
+                width - MOVE_OUTLINE_WIDTH, height - MOVE_OUTLINE_WIDTH,
+            ),
+            (height - MOVE_OUTLINE_WIDTH) / 2.0,
+            (height - MOVE_OUTLINE_WIDTH) / 2.0,
+        )
+        outline.setLineWidth_(MOVE_OUTLINE_WIDTH)
+        outline.stroke()
 
     def _draw_bars(self, data, width: float, height: float) -> None:
         centre_y = height / 2.0
@@ -232,21 +276,26 @@ class FlowBar:
     """
 
     def __init__(
-        self, indicator, position: str = "bottom-centre", fps: int = FPS
+        self,
+        indicator,
+        position: str = "bottom-centre",
+        fps: int = FPS,
+        point=None,
     ) -> None:
         self._indicator = indicator
         self._position = position if position in POSITIONS else "bottom-centre"
         self._fps = fps
+        #: (centre_x, bottom_y) once dragged, else None to use `position`.
+        self._point = list(point) if point else None
         self._panel = None
         self._view = None
         self._timer = None
+        self._movable = False
         self._width = float(wf.PILL_WIDTH)
 
     def open(self) -> None:
         height = float(wf.PILL_HEIGHT)
-        x, y = pill_origin(
-            self._position, self._width, NSScreen.mainScreen().visibleFrame()
-        )
+        x, y = self._origin(self._width, height)
         rect = NSMakeRect(x, y, self._width, height)
 
         self._panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -304,15 +353,56 @@ class FlowBar:
         self._view.setData_(frame)
         self._view.setNeedsDisplay_(True)
 
+    def _origin(self, width: float, height: float):
+        """Where the pill goes: a dragged point if there is one, else a preset."""
+        visible = NSScreen.mainScreen().visibleFrame()
+        if self._point is not None:
+            return point_origin(self._point, width, height, visible)
+        return pill_origin(self._position, width, visible)
+
     def _resize(self, width: float) -> None:
         """Re-anchor as the pill widens for a message, so it does not drift."""
         self._width = width
         height = float(wf.PILL_HEIGHT)
-        x, y = pill_origin(
-            self._position, width, NSScreen.mainScreen().visibleFrame()
-        )
+        x, y = self._origin(width, height)
         self._panel.setFrame_display_(NSMakeRect(x, y, width, height), False)
         self._view.setFrame_(NSMakeRect(0, 0, width, height))
+
+    # --- "Move bar" -------------------------------------------------------
+
+    def set_movable(self, movable: bool) -> None:
+        """Let the pill be dragged, at the cost of click-through while it is on.
+
+        These are one setting, not two: a window that ignores mouse events
+        cannot be dragged, because it never receives the mouse-down that would
+        start the drag. So move mode is exactly "stop ignoring them", and the
+        blue outline the view draws is what makes that visible.
+        """
+        self._movable = bool(movable)
+        if self._panel is not None:
+            self._panel.setIgnoresMouseEvents_(not self._movable)
+        if self._view is not None:
+            self._view.setMovable_(self._movable)
+
+    @property
+    def movable(self) -> bool:
+        return self._movable
+
+    def current_point(self):
+        """Where it is now, as (centre_x, bottom_y), or None if never opened.
+
+        Read back off the panel rather than tracked as the drag happens:
+        AppKit owns the drag once performWindowDragWithEvent_ takes over, and
+        the window's own frame is the only account of where it ended up that
+        cannot disagree with the screen.
+        """
+        if self._panel is None:
+            return None
+        frame = self._panel.frame()
+        return [
+            float(frame.origin.x + frame.size.width / 2.0),
+            float(frame.origin.y),
+        ]
 
     def close(self) -> None:
         """Stop drawing and take the panel off screen. Safe to call twice."""

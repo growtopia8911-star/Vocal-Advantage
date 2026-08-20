@@ -79,9 +79,7 @@ MESSAGE_FONT_SIZE = 11
 #: Matches flowbar_mac's palette exactly. If these two ever drift the pill will
 #: look like a different app on the other machine.
 PILL_FILL_RGB = (247, 246, 241)
-PILL_LINE_RGB = (0, 0, 0)
 BAR_RGB = (0, 0, 0)
-PILL_STROKE_WIDTH = 1.5
 #: Rendered at this multiple and scaled down: Pillow has no antialiasing, and
 #: the whole reason for this file is that the corners should not be jagged.
 SUPERSAMPLE = 4
@@ -200,16 +198,14 @@ def render_frame(frame, width: int, height: int) -> Image.Image:
     draw = ImageDraw.Draw(image)
 
     alpha = int(round(_clamp01(frame.pill_alpha) * 255))
-    stroke = max(1, int(round(PILL_STROKE_WIDTH * scale)))
-    inset = stroke / 2.0
-    radius = (height * scale - stroke) / 2.0    # fully rounded ends
+    radius = height * scale / 2.0      # fully rounded ends
 
+    # Fill only, no outline, on the full bounds -- matching flowbar_mac. The
+    # edge of the fill is what defines the shape now.
     draw.rounded_rectangle(
-        (inset, inset, width * scale - inset, height * scale - inset),
+        (0, 0, width * scale - 1, height * scale - 1),
         radius=radius,
         fill=PILL_FILL_RGB + (alpha,),
-        outline=PILL_LINE_RGB + (alpha,),
-        width=stroke,
     )
 
     bar_alpha = int(round(_clamp01(frame.bar_alpha) * 255))

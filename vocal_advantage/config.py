@@ -53,6 +53,14 @@ DEFAULTS: dict = {
     "flow_bar": True,
     # Where it sits. See FLOW_BAR_POSITIONS.
     "flow_bar_position": "bottom-centre",
+    # Where it was last dragged to, as [centre_x, bottom_y] in screen
+    # coordinates, or null to use flow_bar_position instead. Written by "Move
+    # bar" in the tray menu; delete it by hand to go back to a preset.
+    #
+    # Centre-x rather than left-x on purpose: the pill widens to show a
+    # message, and anchoring the centre keeps it growing evenly in both
+    # directions instead of walking sideways every time one appears.
+    "flow_bar_point": None,
 }
 
 #: The positions the Flow Bar understands. "bottom-center" is accepted as an
@@ -112,8 +120,33 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 
     cfg["flow_bar"] = _checked_flow_bar(cfg["flow_bar"], path)
     cfg["flow_bar_position"] = _checked_position(cfg["flow_bar_position"], path)
+    cfg["flow_bar_point"] = _checked_point(cfg["flow_bar_point"], path)
 
     return cfg
+
+
+def _checked_point(value: object, path: Path) -> list | None:
+    """A pair of numbers, or None with a warning.
+
+    None is the normal state, not an error: it means "use flow_bar_position".
+    A monitor that has since been unplugged can leave coordinates pointing off
+    every screen, so `flowbar_mac` clamps them at use rather than here -- the
+    numbers are still valid, they are just no longer reachable.
+    """
+    if value is None:
+        return None
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        # bool is an int subclass, and [true, false] should not read as a point.
+        and all(isinstance(n, (int, float)) and not isinstance(n, bool) for n in value)
+    ):
+        return [float(value[0]), float(value[1])]
+    warn(
+        f"WARNING: {path}: flow_bar_point should be [x, y] or null, not "
+        f"{value!r}. Using flow_bar_position for this run."
+    )
+    return None
 
 
 def _checked_flow_bar(value: object, path: Path) -> bool:

@@ -288,6 +288,14 @@ Two keys added to `DEFAULTS` in `config.py`. No new file.
 "flow_bar_position": "bottom-centre"
 ```
 
+`flow_bar_point` is `null` normally, and `[centre_x, bottom_y]` once the bar has
+been dragged; when set it overrides `flow_bar_position`. Centre-x rather than
+left-x because the pill widens for a message, and anchoring the centre keeps it
+growing evenly instead of walking sideways each time. It is clamped back onto a
+visible screen at use, not at load: a saved position can name a monitor that has
+since been unplugged, and an invisible bar has nothing on screen to drag it back
+with.
+
 `flow_bar: false` turns the bar off entirely and keeps the tray icon.
 `flow_bar_position` accepts `bottom-centre`, `bottom-left`, `bottom-right` (and
 `bottom-center`, because the muscle memory is real). Anything else warns on
@@ -343,6 +351,24 @@ icon, the layered window. Those are the hand-check list.
 
 `pillow` on both platforms (the icon is generated, not shipped). `pystray`
 marked `sys_platform == 'win32'`. Nothing new on macOS.
+
+## "Move bar" — dragging, added 2026-08-20
+
+Asked for after the fact, and it **conflicts head-on with click-through**, which
+was the stated top priority. They are one setting, not two: a window that
+ignores mouse events never receives the mouse-down that would begin a drag.
+
+Resolved with a third menu item rather than always-on dragging. Move mode is
+off by default, so the pill is click-through the rest of the time; while it is
+on the pill draws a **blue outline**, because leaving the mode on by accident is
+the one real drawback of a toggle and it must not be able to happen quietly.
+
+The drag itself is `performWindowDragWithEvent_` — AppKit takes the whole
+gesture, which is less code than tracking `mouseDragged_` and gets screen edges
+and multiple displays right for free. The position is read back off the panel's
+own frame when Lock is chosen (or at quit, if quitting mid-drag), never tracked
+during the drag: once AppKit owns the gesture, the window frame is the only
+account that cannot disagree with the screen.
 
 ## Known gaps
 

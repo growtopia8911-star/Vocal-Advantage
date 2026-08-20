@@ -81,11 +81,17 @@ class _TrayTarget(NSObject):
             return None
         self._indicator = indicator
         self._on_quit = on_quit
+        self._on_toggle_move = None
+        self._is_movable = None
         self._status_item = None
+        self._move_item = None
         return self
 
     def setStatusMenuItem_(self, item) -> None:
         self._status_item = item
+
+    def setMoveItem_(self, item) -> None:
+        self._move_item = item
 
     def menuNeedsUpdate_(self, _menu) -> None:
         """Refresh the status line as the menu opens.
@@ -94,12 +100,22 @@ class _TrayTarget(NSObject):
         while the menu is on screen, so a timer would be work done once a second
         forever to keep a string nobody is looking at up to date.
         """
-        if self._status_item is None:
-            return
-        try:
-            self._status_item.setTitle_(self._indicator.status_text())
-        except Exception:  # noqa: BLE001 - a menu must still open
-            self._status_item.setTitle_("Unknown")
+        if self._status_item is not None:
+            try:
+                self._status_item.setTitle_(self._indicator.status_text())
+            except Exception:  # noqa: BLE001 - a menu must still open
+                self._status_item.setTitle_("Unknown")
+
+        if self._move_item is not None and self._is_movable is not None:
+            # The title says what clicking will DO, not what the state is --
+            # "Lock bar" while unlocked, so the menu reads as a verb.
+            self._move_item.setTitle_(
+                "Lock bar in place" if self._is_movable() else "Move bar"
+            )
+
+    def toggleMove_(self, _sender) -> None:
+        if self._on_toggle_move is not None:
+            self._on_toggle_move()
 
     def quit_(self, _sender) -> None:
         self._on_quit()
@@ -108,9 +124,13 @@ class _TrayTarget(NSObject):
 class TrayIcon:
     """The menu-bar presence. Main thread only, like everything in AppKit."""
 
-    def __init__(self, indicator, on_quit) -> None:
+    def __init__(self, indicator, on_quit, on_toggle_move=None, is_movable=None) -> None:
         self._indicator = indicator
         self._on_quit = on_quit
+        #: Optional: without both of these the "Move bar" item is left out
+        #: entirely rather than shown doing nothing.
+        self._on_toggle_move = on_toggle_move
+        self._is_movable = is_movable
         self._item = None
         self._target = None
 
@@ -136,6 +156,16 @@ class TrayIcon:
         status.setEnabled_(False)
         menu.addItem_(status)
         self._target.setStatusMenuItem_(status)
+
+        if self._on_toggle_move is not None and self._is_movable is not None:
+            self._target._on_toggle_move = self._on_toggle_move
+            self._target._is_movable = self._is_movable
+            move_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Move bar", "toggleMove:", ""
+            )
+            move_item.setTarget_(self._target)
+            menu.addItem_(move_item)
+            self._target.setMoveItem_(move_item)
 
         menu.addItem_(NSMenuItem.separatorItem())
 
