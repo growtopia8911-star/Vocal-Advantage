@@ -71,14 +71,56 @@ class StreamingTranscript:
         self._previous = words
         return self._advance_to(words)
 
+    def _alignment_point(self, words: list[str]) -> int | None:
+        """Index in ``words`` just past the text already in the document.
+
+        Slicing by position (``words[len(committed):]``) assumes the model's
+        new answer still begins with the words we typed. Revision is the one
+        thing this module exists to survive, so that assumption breaks exactly
+        when it matters: "so think" becoming "so I think we" shifts everything
+        after it by one, and the naive slice then skips a word or repeats one.
+
+        So we align on the document's own trailing words instead. The longest
+        match wins -- it is the strongest evidence -- and among equally long
+        matches the one nearest where we expected it wins, because a lone
+        common word like "the" can otherwise match far down the sentence and
+        skip everything in between.
+        """
+        best: int | None = None
+        for length in range(min(len(self._committed), len(words)), 0, -1):
+            tail = self._committed[-length:]
+            expected = len(self._committed) - length
+            candidates = [
+                start
+                for start in range(len(words) - length + 1)
+                if words[start : start + length] == tail
+            ]
+            if candidates:
+                best = min(candidates, key=lambda start: abs(start - expected))
+                return best + length
+        return None
+
     def _advance_to(self, words: list[str]) -> str:
-        # Never shrink. If the model's newest answer is shorter than what we
-        # already typed, we cannot take those words back: un-typing means
-        # sending backspaces into a document we do not own, and getting the
-        # count wrong there is far worse than one stale word. Documented cost.
-        if len(words) <= len(self._committed):
+        if not words:
             return ""
-        fresh = words[len(self._committed) :]
-        leading = " " if self._committed else ""
-        self._committed = words
-        return leading + " ".join(fresh)
+        if not self._committed:
+            self._committed = list(words)
+            return " ".join(words)
+
+        start = self._alignment_point(words)
+        if start is None:
+            # The new answer shares not one word with the end of the document.
+            # Appending it whole would duplicate a whole sentence into a
+            # document we do not own, which is worse than staying quiet; a
+            # later pass, or finish(), will almost always re-align.
+            return ""
+
+        fresh = words[start:]
+        if not fresh:
+            # Everything the model now says is already typed. Never shrink:
+            # un-typing means sending backspaces into someone else's document,
+            # and getting the count wrong there is far worse than a stale word.
+            return ""
+
+        self._committed.extend(fresh)
+        return " " + " ".join(fresh)

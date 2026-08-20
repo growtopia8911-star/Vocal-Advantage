@@ -123,3 +123,60 @@ def test_a_session_can_be_reset_for_the_next_dictation():
     assert s.typed_so_far == ""
     assert s.commit("second") == ""      # a fresh pass proves nothing again
     assert s.commit("second") == "second"
+
+
+# -- revisions to words that were already typed ----------------------------
+#
+# The module's own docstring says Whisper revises what it already said. These
+# cover what happens when it revises a word we have ALREADY put in the
+# document -- the case that produced "Um, so think should ..." out of "um so I
+# think we should ..." on a real Mac on 2026-08-20. Un-typing stays forbidden;
+# silently dropping the words after the revision is the bug.
+
+
+def _document(passes: list[str], final: str) -> str:
+    """Play a pass sequence through and return what the document would read."""
+    s = StreamingTranscript()
+    chunks = [s.commit(p) for p in passes]
+    chunks.append(s.finish(final))
+    return "".join(chunks)
+
+
+def test_an_insertion_before_typed_words_loses_nothing():
+    """'so think' becoming 'so I think we' must not eat the words after it."""
+    document = _document(
+        ["Um, so think", "Um, so think", "Um, so I think we should",
+         "Um, so I think we should"],
+        "Um, so I think we should ship it on Friday.",
+    )
+    for word in ("we", "should", "ship", "it", "on", "Friday."):
+        assert word in document.split(), f"{word!r} was lost: {document!r}"
+
+
+def test_an_insertion_before_typed_words_does_not_stutter_them():
+    """Aligning on the words actually typed keeps 'think' from doubling."""
+    document = _document(
+        ["Um, so think", "Um, so think", "Um, so I think we should",
+         "Um, so I think we should"],
+        "Um, so I think we should ship it on Friday.",
+    )
+    assert document.split().count("think") == 1, document
+
+
+def test_typed_so_far_tracks_the_document_not_the_latest_hypothesis():
+    """The document is the only thing we can slice against correctly."""
+    s = StreamingTranscript()
+    s.commit("Um, so think")
+    typed = s.commit("Um, so think")
+    s.commit("Um, so I think we should")
+    typed += s.commit("Um, so I think we should")
+    assert s.typed_so_far == typed.strip()
+
+
+def test_the_final_pass_still_owes_words_after_a_revision():
+    """finish() slicing by position can silently owe nothing at all."""
+    s = StreamingTranscript()
+    s.commit("Um, so think")
+    s.commit("Um, so think")
+    owed = s.finish("Um, so I think we should ship it")
+    assert "ship" in owed and "it" in owed, owed
