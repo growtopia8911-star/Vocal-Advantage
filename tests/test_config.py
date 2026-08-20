@@ -37,7 +37,7 @@ def test_config_path_is_config_json_at_the_repo_root():
     [
         ("hotkey", DEFAULT_HOTKEY),
         ("language", "en"),
-        ("model", "large-v3-turbo"),
+        ("model", "base"),
         ("device", "auto"),
         ("min_duration_s", 0.4),
         ("max_duration_s", 300),

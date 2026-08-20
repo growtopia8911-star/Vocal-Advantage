@@ -56,9 +56,9 @@ Every time, in this folder:
 python -m vocal_advantage
 ```
 
-**The first run downloads about 1.6 GB** — the speech model. It goes into your
-user cache folder and only happens once. Progress prints in the window; give it
-five to ten minutes on a normal connection and do not close it.
+**The first run downloads about 141 MB** — the speech model. It goes into your
+user cache folder and only happens once. Progress prints in the window; it is
+usually well under a minute, and the window tells you the size before it starts.
 
 When you see `Ready.`, it is listening for your hotkey.
 
@@ -121,10 +121,29 @@ shared through git — it is your machine's settings.
 | --- | --- | --- |
 | `hotkey` | `"right ctrl"` | The key you hold to talk. |
 | `language` | `"en"` | English. Fixed, so it never has to guess. |
-| `model` | `"large-v3-turbo"` | Which speech model to use. |
+| `model` | `"base"` | Which speech model to use. See the table below. |
 | `device` | `"auto"` | Graphics card if there is one, otherwise CPU. |
 | `min_duration_s` | `0.4` | Anything shorter than this is thrown away. |
 | `max_duration_s` | `300` | Force-stops a recording you forgot about, after 5 minutes. |
+
+### Choosing a model
+
+Bigger models hear better and cost more time. These are measured on an M4
+MacBook Air CPU against a 2.9-second clip, so a graphics card will be several
+times quicker:
+
+| `model` | Download | Time per pass | Speed vs. speech |
+| --- | --- | --- | --- |
+| `tiny` | 75 MB | 0.16s | 17x faster |
+| `base` (default) | 141 MB | 0.29s | 10x faster |
+| `small` | 464 MB | 1.06s | 2.7x faster |
+| `large-v3-turbo` | 1.5 GB | 5.18s | **slower than speaking** |
+
+The live word-by-word preview re-transcribes the whole sentence on every pass,
+so its cost grows with how long you talk. That is why `large-v3-turbo` is not
+the default despite being the most accurate: on a CPU it cannot keep up with
+speech at all, and even `small` starts lagging on long sentences. On a machine
+with an NVIDIA card, raising this is worth trying.
 
 ---
 
@@ -140,8 +159,8 @@ programs from typing into elevated ones — Task Manager, some installers. Nothi
 will appear. The text is still on your clipboard though, so click into the
 window and press Ctrl+V yourself.
 
-**The first run downloads about 1.6 GB.** One time only, but it is a real wait
-and the window looks idle while it happens.
+**The first run downloads the speech model.** One time only, and the window
+prints the size before it starts.
 
 **It does not start by itself.** You launch it, and it stops when you close the
 window. Starting with Windows is a later version.

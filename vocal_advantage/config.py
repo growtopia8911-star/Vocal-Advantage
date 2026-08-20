@@ -32,7 +32,7 @@ DEFAULT_HOTKEY: str = "right alt" if sys.platform == "darwin" else "right ctrl"
 DEFAULTS: dict = {
     "hotkey": DEFAULT_HOTKEY,
     "language": "en",
-    "model": "large-v3-turbo",
+    "model": "base",
     "device": "auto",
     "min_duration_s": 0.4,
     "max_duration_s": 300,

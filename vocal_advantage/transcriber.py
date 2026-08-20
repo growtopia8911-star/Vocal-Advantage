@@ -43,6 +43,26 @@ def assemble_text(segments: Iterable) -> str:
     return " ".join(kept)
 
 
+# Measured on disk in ~/.cache/huggingface/hub, int8 builds. Only the models
+# we have actually weighed appear here: users may name any HuggingFace repo,
+# and a guessed number in a "this will download N" warning is worse than no
+# number at all.
+MODEL_DOWNLOAD_SIZES: dict[str, str] = {
+    "tiny": "75 MB",
+    "base": "141 MB",
+    "small": "464 MB",
+    "large-v3-turbo": "1.5 GB",
+}
+
+
+def download_note(model_name: str) -> str:
+    """One parenthetical about first-run download cost for ``model_name``."""
+    size = MODEL_DOWNLOAD_SIZES.get(model_name)
+    if size is None:
+        return "(First run only: this downloads the model to your user cache.)"
+    return f"(First run only: this downloads {size} to your user cache.)"
+
+
 # Fallback chain per device setting. cuda/int8_float16 uses ~1.5-2GB of the
 # 6GB card and turns a 10-30s utterance around in 1-2s; cpu/int8 is the
 # it-still-works path.
@@ -110,7 +130,7 @@ class Transcriber:
         plan = self._device_plan()
         print(
             f"Loading speech model {self.model_name!r} "
-            "(first run downloads ~1.6 GB to ~/.cache/huggingface/hub)...",
+            f"{download_note(self.model_name)}",
             flush=True,
         )
 

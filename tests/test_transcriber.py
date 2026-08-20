@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from vocal_advantage import transcriber
 from vocal_advantage.transcriber import (
     SAMPLE_RATE,
     Transcriber,
@@ -383,3 +384,20 @@ def test_the_real_model_transcribes_the_fixture_wav():
     text = transcriber.transcribe(audio)
 
     assert "testing" in text.lower()
+
+
+# -- download size note ----------------------------------------------------
+
+
+def test_download_note_names_the_size_of_the_model_actually_being_loaded():
+    """The startup line must not quote one model's size while loading another."""
+    assert "75 MB" in transcriber.download_note("tiny")
+    assert "141 MB" in transcriber.download_note("base")
+    assert "1.5 GB" in transcriber.download_note("large-v3-turbo")
+
+
+def test_download_note_invents_no_number_for_an_unknown_model():
+    """Users may name any HuggingFace model; guessing its size would mislead."""
+    note = transcriber.download_note("someone/a-finetune-we-never-shipped")
+    assert note.strip()
+    assert "MB" not in note and "GB" not in note
