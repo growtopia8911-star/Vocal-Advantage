@@ -27,7 +27,7 @@ from vocal_advantage import cuda_dlls
 from vocal_advantage.config import CONFIG_PATH, load_config, save_config
 from vocal_advantage.controller import DictationController
 from vocal_advantage.hotkey_spec import HotkeyError, HotkeySpec, parse_hotkey
-from vocal_advantage.cleanup import ai_clean, clean_speech
+from vocal_advantage.cleanup import ai_clean, clean_speech, warm_up_model
 from vocal_advantage.streaming import StreamingTranscript
 
 VERSION = "0.1.0"
@@ -133,6 +133,25 @@ def _cleaner(cfg: dict):
     if cfg.get("ai_cleanup", False):
         return ai_clean
     return clean_speech
+
+
+def _warm_up_ai_cleanup(cfg: dict) -> None:
+    """Load the Ollama model now, so the first dictation is not the slow one.
+
+    Says so on the console either way. Ollama being absent is a supported
+    state, not an error -- the rules-only cleanup does not need it.
+    """
+    if not cfg.get("ai_cleanup", False):
+        return
+    print("Warming up the AI cleanup model ...", flush=True)
+    if warm_up_model():
+        print("AI cleanup ready.", flush=True)
+    else:
+        print(
+            "WARNING: AI cleanup is on but Ollama did not answer. Filler and "
+            "stutter removal still works; the extra pass will be skipped.",
+            file=sys.stderr, flush=True,
+        )
 
 
 def live_typing_enabled(cfg: dict) -> bool:
@@ -508,6 +527,7 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     # is what makes the first real dictation as fast as the tenth.
     transcriber.warm_up()
     print("Model ready.")
+    _warm_up_ai_cleanup(cfg)
 
     recorder = Recorder()
     controller = DictationController(
@@ -661,6 +681,7 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     )
     transcriber.warm_up()
     print("Model ready.")
+    _warm_up_ai_cleanup(cfg)
 
     recorder = Recorder()
     # The raw transcriber for partial passes: narrating every one of them would

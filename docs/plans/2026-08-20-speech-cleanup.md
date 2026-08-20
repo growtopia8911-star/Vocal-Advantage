@@ -45,3 +45,44 @@ Each line is a yes/no I can check by looking.
 - Deterministic, so repeated passes over a growing utterance stay consistent
   and LocalAgreement-2 keeps working.
 - Never invent a word. Removal and capitalisation only.
+
+---
+
+## Outcome — the AI pass (2026-08-20)
+
+Built to spec, off by default, `ai_cleanup` in `config.json`.
+
+**qwen3:4b does not work for this and cannot be made to.** It is a reasoning
+model; `think: false` removes the `<think>` tags but not the reasoning, which
+then arrives as prose in the content field.
+
+| Attempt | Result |
+| --- | --- |
+| `think: false`, 87 tokens (spec formula) | preamble only, cut off |
+| `think: false`, 2000 tokens | 62s, still deliberating, no answer |
+| `think: true`, 1200 tokens | 35–85s, ~850 words of thinking, no answer |
+| temperature 0 vs 0.7 / top_p 0.1 vs 0.8 | no difference |
+| few-shot only, hard no-preamble line, assistant prefill | no difference |
+
+**`qwen2.5:3b-instruct` works.** 12 ordinary dictations, guard applied: 10 kept,
+~0.5s each. Both rejections were the guard catching a real meaning change.
+`llama3.2:3b` was worse — it answered the question transcript ("I don't know
+the capital of France") and swapped "a sec" for "a moment".
+
+**The lesson worth keeping: use a non-reasoning instruct model.** A reasoning
+model will spend more words deliberating about removing an "um" than the
+sentence contains.
+
+Warm-up added: a cold 2 GB model takes ~10s to load, which would blow the 6s
+budget on the very first dictation — the one that forms the opinion.
+
+### Guard results in the wild
+
+Both candidate models tried to answer the transcript rather than clean it:
+
+    "um whats the capital of france"
+      llama3.2:3b -> "I don't know the capital of France."   binned
+      qwen2.5:3b  -> "The capital of France is Paris."       binned
+
+Which is precisely the failure Kevin predicted when specifying the check, and
+the reason no length-based rule alone would be enough.

@@ -113,7 +113,13 @@ from datetime import datetime
 from pathlib import Path
 
 OLLAMA_URL: str = "http://localhost:11434/api/chat"
-OLLAMA_MODEL: str = "qwen3:4b"
+#: Measured on this Mac against 12 ordinary dictations: 10 kept by the guard,
+#: ~0.5s each. qwen3:4b was tried first and cannot do this job at all -- it is
+#: a reasoning model, and denied its <think> tags it reasons in prose instead,
+#: spending 850 words and 35-85s deciding whether "so" is a filler without ever
+#: reaching an answer. Temperature made no difference; five prompt shapes made
+#: no difference. Use a non-reasoning instruct model here.
+OLLAMA_MODEL: str = "qwen2.5:3b-instruct"
 
 #: Dictation must never hang on this. Six seconds is already a long time to
 #: watch nothing appear; past it the rules-only text is typed instead.
@@ -424,3 +430,22 @@ def ai_clean(
         },
     )
     return final
+
+
+def warm_up_model(
+    *, post=_post_json, url: str = OLLAMA_URL, model: str = OLLAMA_MODEL,
+    timeout_s: float = 30.0,
+) -> bool:
+    """Load the model into memory before the first dictation needs it.
+
+    A cold 2 GB model takes about ten seconds to load, which would blow the
+    six-second budget and silently fall back on the very first sentence --
+    the one most likely to form Kevin's opinion of the feature. Returns False
+    if Ollama is not there, which is not an error: the rules still work.
+    """
+    try:
+        post(url, {"model": model, "messages": [{"role": "user", "content": "hi"}],
+                   "stream": False, "options": {"num_predict": 1}}, timeout_s)
+        return True
+    except Exception:  # noqa: BLE001 - absence of Ollama is a supported state
+        return False

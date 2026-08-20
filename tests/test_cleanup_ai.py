@@ -405,3 +405,30 @@ def test_a_long_dictation_tolerates_one_repaired_word():
     )
     accepted, failed = _ok(said, cleaned)
     assert accepted, failed
+
+
+# -- warm-up ---------------------------------------------------------------
+
+
+def test_warming_up_asks_for_one_token():
+    """Loading a 2 GB model takes ~10s. Paying that at startup rather than on
+    Kevin's first sentence is the difference between working and timing out."""
+    seen = {}
+
+    def post(url, payload, timeout):
+        seen.update(payload)
+        return {"message": {"content": "ok"}}
+
+    from vocal_advantage.cleanup import warm_up_model
+    warm_up_model(post=post)
+    assert seen["options"]["num_predict"] == 1
+    assert seen["model"]
+
+
+def test_warming_up_never_raises_when_ollama_is_missing():
+    from vocal_advantage.cleanup import warm_up_model
+
+    def post(url, payload, timeout):
+        raise ConnectionRefusedError("nothing there")
+
+    assert warm_up_model(post=post) is False
