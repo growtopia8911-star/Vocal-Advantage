@@ -122,6 +122,12 @@ class Transcriber:
 
     def _device_plan(self) -> tuple[tuple[str, str], ...]:
         key = (self.device or "").strip().lower()
+        if key == "auto" and sys.platform == "darwin":
+            # CTranslate2 has no CUDA build for Apple Silicon, so "auto" would
+            # attempt it, fail, and warn -- every launch, about something that
+            # can never work. An explicit device="cuda" still tries, because an
+            # explicit request deserves an explicit failure.
+            return _DEVICE_PLANS["cpu"]
         plan = _DEVICE_PLANS.get(key)
         if plan is None:
             print(
@@ -159,8 +165,14 @@ class Transcriber:
 
             if device == "cpu" and plan[0][0] != "cpu":
                 print(
-                    "WARNING: running on CPU. Transcription will take several "
-                    "seconds per utterance instead of 1-2.",
+                    # No number here on purpose. This used to promise
+                    # "several seconds per utterance instead of 1-2", which
+                    # was true of large-v3-turbo and nonsense for base --
+                    # 0.30s on this Mac's CPU. Speed depends entirely on the
+                    # model, and a stale figure alarms people for no reason.
+                    f"NOTE: running {self.model_name!r} on the CPU. A "
+                    "graphics card would be faster; smaller models are "
+                    "faster still. See the model table in the README.",
                     file=sys.stderr,
                     flush=True,
                 )

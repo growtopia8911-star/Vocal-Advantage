@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from vocal_advantage import transcriber
+from vocal_advantage import transcriber as transcriber_module
 from vocal_advantage.transcriber import (
     SAMPLE_RATE,
     Transcriber,
@@ -248,7 +249,10 @@ def test_the_model_is_loaded_once_and_kept_resident():
     assert len(factory.calls) == 1
 
 
-def test_auto_device_prefers_cuda_int8_float16():
+def test_auto_device_prefers_cuda_int8_float16(monkeypatch):
+    # "auto" only reaches for CUDA off a Mac; on darwin it goes straight to
+    # the CPU, so this test has to say which platform it is about.
+    monkeypatch.setattr(transcriber_module.sys, "platform", "win32")
     factory = FakeFactory(FakeModel([FakeSegment(text="hi")]))
     transcriber = make_transcriber(factory, device="auto")
 
@@ -259,7 +263,10 @@ def test_auto_device_prefers_cuda_int8_float16():
     assert transcriber.compute_type_in_use == "int8_float16"
 
 
-def test_cuda_failure_falls_back_to_cpu_with_a_console_warning(capsys):
+def test_cuda_failure_falls_back_to_cpu_with_a_console_warning(capsys, monkeypatch):
+    # "auto" only reaches for CUDA off a Mac; on darwin it goes straight to
+    # the CPU, so this test has to say which platform it is about.
+    monkeypatch.setattr(transcriber_module.sys, "platform", "win32")
     factory = FakeFactory(FakeModel([FakeSegment(text="hi")]), fail_on={"cuda"})
     transcriber = make_transcriber(factory, device="auto")
 
@@ -295,7 +302,10 @@ def test_an_unrecognised_device_setting_warns_and_behaves_like_auto(capsys):
     assert "gpu" in capsys.readouterr().err
 
 
-def test_a_total_load_failure_raises_with_both_attempts_named():
+def test_a_total_load_failure_raises_with_both_attempts_named(monkeypatch):
+    # "auto" only reaches for CUDA off a Mac; on darwin it goes straight to
+    # the CPU, so this test has to say which platform it is about.
+    monkeypatch.setattr(transcriber_module.sys, "platform", "win32")
     factory = FakeFactory(fail_on={"cuda", "cpu"})
     transcriber = make_transcriber(factory, device="auto")
 
@@ -431,3 +441,42 @@ def test_assemble_text_reports_nothing_when_nothing_is_dropped():
 
 def test_assemble_text_still_works_without_a_reporter():
     assert assemble_text([FakeSegment(text="hello")]) == "hello"
+
+
+def test_the_cpu_notice_does_not_promise_a_speed_it_cannot_know(capsys, monkeypatch):
+    # "auto" only reaches for CUDA off a Mac; on darwin it goes straight to
+    # the CPU, so this test has to say which platform it is about.
+    monkeypatch.setattr(transcriber_module.sys, "platform", "win32")
+    """It used to say "several seconds per utterance instead of 1-2", which was
+    true of large-v3-turbo and is nonsense for base: 0.30s on this Mac's CPU.
+    Speed depends on the model, so the notice must not quote a number."""
+    factory = FakeFactory(fail_on={"cuda"})
+    t = Transcriber("base", "auto", "en", 0.4)
+    t.model_factory = factory
+    t._ensure_model()
+    err = capsys.readouterr().err
+    assert "CPU" in err
+    assert "several seconds" not in err
+    assert "1-2" not in err
+
+
+def test_auto_does_not_try_cuda_on_a_mac(monkeypatch):
+    """CTranslate2 has no CUDA build for Apple Silicon, so attempting it warns
+    about a failure that can never be anything else. A warning printed on every
+    launch for an impossibility trains people to ignore warnings."""
+    monkeypatch.setattr(transcriber.sys, "platform", "darwin")
+    t = Transcriber("base", "auto", "en", 0.4)
+    assert t._device_plan() == (("cpu", "int8"),)
+
+
+def test_auto_still_tries_cuda_on_windows(monkeypatch):
+    monkeypatch.setattr(transcriber.sys, "platform", "win32")
+    t = Transcriber("base", "auto", "en", 0.4)
+    assert t._device_plan()[0] == ("cuda", "int8_float16")
+
+
+def test_asking_for_cuda_explicitly_on_a_mac_still_tries_and_warns(monkeypatch):
+    """An explicit request deserves an explicit failure, not silence."""
+    monkeypatch.setattr(transcriber.sys, "platform", "darwin")
+    t = Transcriber("base", "cuda", "en", 0.4)
+    assert t._device_plan()[0] == ("cuda", "int8_float16")

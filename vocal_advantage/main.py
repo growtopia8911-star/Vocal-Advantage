@@ -510,12 +510,6 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     print(
         "Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"])
     )
-    # Local import for the same reason as import_transcriber_class: this
-    # module must not be imported before cuda_dlls.prepare() has a chance
-    # to run. download_note itself is pure data and touches no DLLs.
-    from vocal_advantage.transcriber import download_note
-
-    print(download_note(cfg["model"]))
     transcriber_cls = import_transcriber_class()
     transcriber = transcriber_cls(
         model_name=cfg["model"],
@@ -666,12 +660,6 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     indicator = ConsoleIndicator()
 
     print("Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"]))
-    # Local import for the same reason as import_transcriber_class: this
-    # module must not be imported before cuda_dlls.prepare() has a chance
-    # to run. download_note itself is pure data and touches no DLLs.
-    from vocal_advantage.transcriber import download_note
-
-    print(download_note(cfg["model"]))
     transcriber_cls = import_transcriber_class()
     transcriber = transcriber_cls(
         model_name=cfg["model"],
