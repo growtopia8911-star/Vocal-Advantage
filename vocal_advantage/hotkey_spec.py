@@ -66,7 +66,18 @@ BANNED: dict[str, str] = {
 # it is the entire hotkey -- SPEC's table says bare ``win`` is out but
 # ``ctrl+win`` is fine.
 _BANNED_ANYWHERE = frozenset({"caps lock"})
-_BANNED_ALONE = frozenset({"windows", "left windows", "right windows"})
+
+# A bare Windows key is refused because *releasing* it opens the Start menu.
+# That is a Windows behaviour, not a universal one: releasing Command on macOS
+# does nothing at all, and Right Command is the natural hold-to-talk key there
+# -- it is where your hand already rests, immediately right of the space bar.
+# Caps Lock stays banned everywhere, because that ban is about needing to
+# swallow the keypress, which this app never does on any platform.
+_BANNED_ALONE = (
+    frozenset()
+    if sys.platform == "darwin"
+    else frozenset({"windows", "left windows", "right windows"})
+)
 
 # Display order: modifiers first in the order people say them, then everything
 # else alphabetically. Keeps ``str(spec)`` stable even though ``keys`` is a set.
@@ -94,6 +105,18 @@ _DISPLAY_OVERRIDES = {
     "left windows": "Left Win",
     "right windows": "Right Win",
 }
+
+if sys.platform == "darwin":
+    # Same key, different lid. Telling a Mac user their hotkey is "Right Win"
+    # when the key says Command on it would be baffling, and this string is what
+    # --set-hotkey echoes back and what the app prints on every launch.
+    _DISPLAY_OVERRIDES.update(
+        {
+            "windows": "Cmd",
+            "left windows": "Left Cmd",
+            "right windows": "Right Cmd",
+        }
+    )
 
 
 def _display(name: str) -> str:
@@ -143,6 +166,21 @@ class HotkeySpec:
         return any(k in MODIFIERS for k in self.keys)
 
 
+# macOS names its modifiers differently. Accepted on every platform, not just
+# the Mac, so a config.json written on one machine parses on the other.
+_MAC_ALIASES = {
+    "cmd": "windows",
+    "command": "windows",
+    "left cmd": "left windows",
+    "left command": "left windows",
+    "right cmd": "right windows",
+    "right command": "right windows",
+    "option": "alt",
+    "left option": "left alt",
+    "right option": "right alt",
+}
+
+
 def _canonical(cleaned: str, original: str) -> str:
     """Return the library's canonical name for one key, or raise HotkeyError.
 
@@ -175,6 +213,9 @@ def _canonical(cleaned: str, original: str) -> str:
     controller -- fully testable on a Mac, which is where the recorder and the
     state machine get built. Windows always takes the live-library path.
     """
+    cleaned = " ".join(cleaned.replace("_", " ").split())
+    cleaned = _MAC_ALIASES.get(cleaned, cleaned)
+
     if sys.platform != "win32":
         return _canonical_from_table(cleaned, original)
 

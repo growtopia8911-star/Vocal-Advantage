@@ -76,12 +76,6 @@ REJECTED = [
     ("nonsense", "not a key name"),
     ("f27", "not a key name"),
     ("ctrl+nonsense", "not a key name"),
-    ("win", "start menu"),
-    ("Win", "start menu"),
-    ("windows", "start menu"),
-    ("cmd", "start menu"),
-    ("left win", "start menu"),
-    ("right windows", "start menu"),
     ("caps lock", "swallows"),
     ("Caps Lock", "swallows"),
     ("capslock", "swallows"),
@@ -91,6 +85,52 @@ REJECTED = [
     ("ctrl++win", "empty key"),
     ("ctrl+c, ctrl+v", "sequence of two shortcuts"),
 ]
+
+# A bare Windows key is refused because *releasing* it opens the Start menu.
+# That is a Windows fact, not a universal one: releasing Command on macOS does
+# nothing at all, and Right Command is the natural hold-to-talk key there.
+WIN_KEY_ALONE = ["win", "Win", "windows", "cmd", "left win", "right windows"]
+
+
+@pytest.mark.parametrize("text", WIN_KEY_ALONE)
+def test_a_bare_windows_key_is_refused_on_windows_and_allowed_on_macos(text):
+    import sys
+
+    if sys.platform == "darwin":
+        assert parse_hotkey(text).keys  # accepted, and resolves to something
+    else:
+        with pytest.raises(HotkeyError) as caught:
+            parse_hotkey(text)
+        assert "start menu" in str(caught.value).lower()
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("right command", "right windows"),
+        ("right cmd", "right windows"),
+        ("left command", "left windows"),
+        ("command", "windows"),
+        ("right option", "right alt"),
+        ("left option", "left alt"),
+        ("option", "alt"),
+    ],
+)
+def test_mac_key_spellings_resolve_onto_the_shared_vocabulary(text, expected):
+    """macOS Option is Alt, and Command occupies the Windows key's slot.
+
+    Mapping them onto one vocabulary is what keeps a single config.json
+    portable between the Windows machine and the Mac.
+    """
+    # Paired with f8 so the bare-modifier rules cannot interfere with the check.
+    assert expected in parse_hotkey(f"{text}+f8").keys
+
+
+def test_caps_lock_stays_refused_on_every_platform():
+    """Unlike the Start-menu rule, this one is not platform-specific: it needs
+    the app to swallow the keypress, and it never does that anywhere."""
+    with pytest.raises(HotkeyError):
+        parse_hotkey("caps lock")
 
 
 @pytest.mark.parametrize("text,fragment", REJECTED, ids=[repr(t) for t, _ in REJECTED])
@@ -107,19 +147,31 @@ def test_non_string_is_refused_not_crashed():
         parse_hotkey(8)
 
 
-def test_ctrl_win_is_allowed_even_though_bare_win_is_not():
-    """SPEC: bare `win` is out because releasing it opens Start; combos are fine."""
-    with pytest.raises(HotkeyError):
-        parse_hotkey("win")
+def test_ctrl_win_is_allowed_on_every_platform():
+    """SPEC: bare `win` is out on Windows because releasing it opens Start.
+
+    The combo is fine everywhere, and on macOS -- where releasing Command does
+    nothing -- the bare key is fine too. See
+    test_a_bare_windows_key_is_refused_on_windows_and_allowed_on_macos.
+    """
+    import sys
+
+    if sys.platform != "darwin":
+        with pytest.raises(HotkeyError):
+            parse_hotkey("win")
     assert parse_hotkey("ctrl+win").keys == frozenset({"ctrl", "windows"})
 
 
 def test_banned_reasons_reach_the_user():
+    import sys
+
     for reason in BANNED.values():
         assert reason and reason == reason.strip()
-    with pytest.raises(HotkeyError) as caught:
-        parse_hotkey("win")
-    assert BANNED["windows"] in str(caught.value)
+    # The Start-menu reason only applies where the Start menu exists.
+    if sys.platform != "darwin":
+        with pytest.raises(HotkeyError) as caught:
+            parse_hotkey("win")
+        assert BANNED["windows"] in str(caught.value)
     with pytest.raises(HotkeyError) as caught:
         parse_hotkey("caps lock")
     assert BANNED["caps lock"] in str(caught.value)
@@ -158,15 +210,21 @@ def test_empty_spec_is_not_modifier_only():
     assert HotkeySpec(frozenset()).is_modifier_only is False
 
 
+import sys as _sys
+
+# On a Mac the key is Command; calling it "Win" in the app's own echo line
+# would be baffling.
+_WIN = "Cmd" if _sys.platform == "darwin" else "Win"
+
 DISPLAY = [
-    ({"ctrl", "windows"}, "Ctrl + Win"),
+    ({"ctrl", "windows"}, f"Ctrl + {_WIN}"),
     ({"right ctrl"}, "Right Ctrl"),
     ({"f8"}, "F8"),
     ({"ctrl", "alt", "space"}, "Ctrl + Alt + Space"),
     ({"space", "ctrl"}, "Ctrl + Space"),
     ({"shift", "alt"}, "Alt + Shift"),
     ({"a", "f8"}, "A + F8"),
-    ({"left windows", "shift"}, "Shift + Left Win"),
+    ({"left windows", "shift"}, f"Shift + Left {_WIN}"),
     ({"caps lock"}, "Caps Lock"),
 ]
 

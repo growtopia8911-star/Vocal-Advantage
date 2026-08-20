@@ -7,6 +7,7 @@ config.json at the repo root is never read or written by this file.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -91,7 +92,15 @@ def test_unknown_keys_are_preserved(tmp_path):
     assert cfg["language"] == DEFAULTS["language"]
 
 
-@pytest.mark.parametrize("bad", ["nonsense", "win", "caps lock", ""])
+# "win" is only unusable on Windows, where releasing it opens the Start menu;
+# on macOS the same key is Command and is perfectly good as a hotkey. The other
+# three are refused on every platform.
+_BAD_HOTKEYS = ["nonsense", "caps lock", ""]
+if sys.platform != "darwin":
+    _BAD_HOTKEYS.append("win")
+
+
+@pytest.mark.parametrize("bad", _BAD_HOTKEYS)
 def test_invalid_hotkey_falls_back_to_the_default_and_warns(tmp_path, capsys, bad):
     # Spec: on startup an unusable hotkey warns loudly, falls back to the
     # platform default, and the app keeps running. It must never crash.
