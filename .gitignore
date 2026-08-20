@@ -11,3 +11,4 @@ __pycache__/
 *.egg-info/
 .wheels/
 logs/
+tests/fixtures/accuracy/
