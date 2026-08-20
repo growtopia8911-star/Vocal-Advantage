@@ -27,7 +27,7 @@ from vocal_advantage import cuda_dlls
 from vocal_advantage.config import CONFIG_PATH, load_config, save_config
 from vocal_advantage.controller import DictationController
 from vocal_advantage.hotkey_spec import HotkeyError, HotkeySpec, parse_hotkey
-from vocal_advantage.cleanup import clean_speech
+from vocal_advantage.cleanup import ai_clean, clean_speech
 from vocal_advantage.streaming import StreamingTranscript
 
 VERSION = "0.1.0"
@@ -123,10 +123,26 @@ class NarratingTranscriber:
 
 
 def _cleaner(cfg: dict):
-    """clean_speech from config, as the callable both platforms take."""
-    if cfg.get("clean_speech", True):
-        return clean_speech
-    return lambda text: text
+    """The text-to-text callable both platforms take, chosen by config.
+
+    clean_speech=false wins over ai_cleanup=true: asking for the raw
+    transcript and then running it through a model would be a contradiction.
+    """
+    if not cfg.get("clean_speech", True):
+        return lambda text: text
+    if cfg.get("ai_cleanup", False):
+        return ai_clean
+    return clean_speech
+
+
+def live_typing_enabled(cfg: dict) -> bool:
+    """False while the AI pass is on.
+
+    It can only clean a finished sentence, so words typed as they are spoken
+    would have to be backspaced over afterwards -- into a document we do not
+    own. Nothing is typed until the key is released instead.
+    """
+    return not cfg.get("ai_cleanup", False)
 
 
 class CleaningPaster:
@@ -664,7 +680,7 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         indicator=indicator,
         min_duration_s=float(cfg["min_duration_s"]),
         max_duration_s=float(cfg["max_duration_s"]),
-        on_partial=live.on_partial,
+        on_partial=live.on_partial if live_typing_enabled(cfg) else None,
     )
 
     events: "queue.Queue" = queue.Queue()

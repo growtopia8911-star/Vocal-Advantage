@@ -39,6 +39,7 @@ def test_config_path_is_config_json_at_the_repo_root():
         ("language", "en"),
         ("model", "base"),
         ("clean_speech", True),
+        ("ai_cleanup", False),
         ("device", "auto"),
         ("min_duration_s", 0.4),
         ("max_duration_s", 300),
@@ -57,6 +58,7 @@ def test_defaults_has_exactly_the_spec_keys():
         "min_duration_s",
         "max_duration_s",
         "clean_speech",
+        "ai_cleanup",
     }
 
 

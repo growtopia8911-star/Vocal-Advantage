@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from vocal_advantage import cleanup as va_cleanup
 from vocal_advantage import main as va_main
 from vocal_advantage.hotkey_spec import HotkeyError, parse_hotkey
 
@@ -930,3 +931,33 @@ def test_the_wrapper_can_be_switched_off():
     paster = va_main.CleaningPaster(inner, clean=lambda text: text)
     paster.paste_text("Um, hello")
     assert inner.pasted == ["Um, hello"]
+
+
+# -- which cleaner each config asks for -------------------------------------
+
+
+def test_the_rules_cleaner_is_the_default():
+    assert va_main._cleaner({}) is va_cleanup.clean_speech
+
+
+def test_switching_cleaning_off_gives_the_raw_transcript():
+    cleaner = va_main._cleaner({"clean_speech": False})
+    assert cleaner("Um, hello") == "Um, hello"
+
+
+def test_enabling_ai_cleanup_selects_the_model_pass():
+    assert va_main._cleaner({"ai_cleanup": True}) is va_cleanup.ai_clean
+
+
+def test_ai_cleanup_off_beats_ai_cleanup_on_when_cleaning_is_off_entirely():
+    """clean_speech=false means raw. The AI pass would clean it anyway."""
+    cleaner = va_main._cleaner({"clean_speech": False, "ai_cleanup": True})
+    assert cleaner("Um, hello") == "Um, hello"
+
+
+def test_live_typing_is_paused_while_ai_cleanup_is_on():
+    """The AI can only clean a finished sentence. Typing words first would mean
+    backspacing over them, so nothing is typed until the key is released."""
+    assert va_main.live_typing_enabled({}) is True
+    assert va_main.live_typing_enabled({"ai_cleanup": False}) is True
+    assert va_main.live_typing_enabled({"ai_cleanup": True}) is False

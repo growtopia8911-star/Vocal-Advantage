@@ -41,6 +41,12 @@ DEFAULTS: dict = {
     # real dictation came back as "Um, so I think we should ship it on
     # Friday." -- Whisper punctuates well but keeps every "um".
     "clean_speech": True,
+    # An extra pass through a local Ollama model (qwen3:4b) that collapses
+    # self-corrections and breaks run-on speech into sentences. Off by
+    # default: it needs Ollama running, it costs up to 6s after you release
+    # the key, and it pauses the word-by-word preview -- the model can only
+    # clean a finished sentence. Filler removal above does not depend on it.
+    "ai_cleanup": False,
 }
 
 
