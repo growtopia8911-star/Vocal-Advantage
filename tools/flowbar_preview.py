@@ -1,4 +1,4 @@
-"""Look at the Flow Bar without running the app. macOS.
+"""Look at the Flow Bar without running the app. macOS and Windows.
 
     python tools/flowbar_preview.py                     # cycle every state
     python tools/flowbar_preview.py --state recording   # hold one state
@@ -8,6 +8,11 @@ No model, no hotkey, no tray -- it starts in about a second, so the look and
 the motion can be iterated on without a 30-second restart each time. The
 microphone is real: in the recording state the bars are responding to your
 actual voice, through the same `Recorder` the app uses.
+
+**On Windows this is the first thing to run**, before the app itself. The
+layered-window renderer was written on a Mac and never executed, so seeing the
+pill on its own -- with no model load and no hotkey hook in the way -- is the
+fastest way to find out whether it draws at all.
 
 Not a pytest test. The maths behind the motion is tested in
 tests/test_waveform.py and tests/test_flowbar.py; this is the part that has to
@@ -28,13 +33,16 @@ from __future__ import annotations
 
 import argparse
 import sys
-
-from PyObjCTools import AppHelper
+import time
 
 from vocal_advantage import flowbar
 from vocal_advantage.flowbar import Indicator
-from vocal_advantage.flowbar_mac import POSITIONS, FlowBar, ensure_app
 from vocal_advantage.recorder import Recorder, RecorderError
+
+if sys.platform == "darwin":
+    from vocal_advantage.flowbar_mac import POSITIONS, FlowBar, ensure_app
+else:
+    from vocal_advantage.flowbar_win import POSITIONS, FlowBar, set_dpi_awareness
 
 # (label, seconds). Recording gets the longest slot because it is the only one
 # you can steer, by talking.
@@ -104,11 +112,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if sys.platform != "darwin":
-        print("This preview is macOS only.", file=sys.stderr)
-        return 1
-
-    ensure_app()
+    if sys.platform == "darwin":
+        ensure_app()
+    else:
+        # Before any window exists, or Windows stretches the pill and the
+        # "bottom centre of the screen" arithmetic is wrong above 100% scaling.
+        set_dpi_awareness()
 
     recorder = Recorder()
     indicator = Indicator(level_source=lambda: recorder.level)
@@ -116,6 +125,25 @@ def main(argv: list[str] | None = None) -> int:
     bar.open()
 
     preview = Preview(indicator, recorder)
+    message_period = flowbar.MESSAGE_FRAMES / args.fps
+
+    print("Ctrl+C to quit.")
+    try:
+        if sys.platform == "darwin":
+            _run_mac(preview, indicator, args, message_period)
+        else:
+            _run_windows(preview, indicator, args, message_period)
+    except KeyboardInterrupt:
+        print("")
+    finally:
+        preview.stop()
+        bar.close()
+    return 0
+
+
+def _run_mac(preview, indicator, args, message_period) -> None:
+    """macOS: AppKit owns the main thread, so the script runs on its run loop."""
+    from PyObjCTools import AppHelper
 
     if args.state:
         preview.enter(args.state)
@@ -124,24 +152,29 @@ def main(argv: list[str] | None = None) -> int:
             # would be nothing to look at.
             def renew() -> None:
                 indicator.flash(MESSAGE)
-                AppHelper.callLater(flowbar.MESSAGE_FRAMES / args.fps, renew)
+                AppHelper.callLater(message_period, renew)
 
-            AppHelper.callLater(flowbar.MESSAGE_FRAMES / args.fps, renew)
+            AppHelper.callLater(message_period, renew)
     else:
         def step() -> None:
             AppHelper.callLater(preview.advance(), step)
 
         step()
 
-    print("Ctrl+C to quit.")
-    try:
-        AppHelper.runEventLoop()
-    except KeyboardInterrupt:
-        print("")
-    finally:
-        preview.stop()
-        bar.close()
-    return 0
+    AppHelper.runEventLoop()
+
+
+def _run_windows(preview, indicator, args, message_period) -> None:
+    """Windows: the bar owns its own thread, so this one only has to wait."""
+    if args.state:
+        preview.enter(args.state)
+        while True:
+            time.sleep(message_period if args.state == "message" else 0.5)
+            if args.state == "message":
+                indicator.flash(MESSAGE)
+    else:
+        while True:
+            time.sleep(preview.advance())
 
 
 if __name__ == "__main__":
