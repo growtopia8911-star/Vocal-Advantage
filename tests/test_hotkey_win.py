@@ -11,6 +11,7 @@ import threading
 
 import pytest
 
+from vocal_advantage import _key_names
 from vocal_advantage.hotkey_spec import HotkeySpec, parse_hotkey
 from vocal_advantage.hotkey_win import VK_CODES, normalise_key_name, spec_key_for
 
@@ -415,7 +416,21 @@ def test_capture_session_is_not_done_while_a_key_is_still_held():
 
 
 class ScriptedKeyboard:
-    """Replays one canned chord per hook() call, synchronously."""
+    """Replays one canned chord per hook() call, synchronously.
+
+    It stands in for the whole ``keyboard`` module, so it has to answer
+    everything the code under test asks of it -- not just the hook pair.
+    ``HotkeySpec._canonical`` also calls ``normalize_name`` and
+    ``key_to_scan_codes``, but *only on Windows*: off Windows it returns early
+    against the vendored table and never touches the library at all. A double
+    missing those two therefore passes everywhere except the one platform the
+    app ships on, which is exactly what happened -- macOS was green while
+    Windows raised ``AttributeError``.
+
+    Both are backed by ``_key_names``, the table captured from the real library,
+    so this double agrees with it for as long as
+    ``test_vendored_key_table_matches_the_library`` says the table is current.
+    """
 
     def __init__(self, scripts):
         self.scripts = list(scripts)
@@ -430,6 +445,19 @@ class ScriptedKeyboard:
 
     def unhook(self, handle):
         pass
+
+    def normalize_name(self, name):
+        """Mirrors ``keyboard.normalize_name``: lower-case, underscores to
+        spaces, whitespace collapsed, then the alias map."""
+        name = " ".join(name.lower().replace("_", " ").split())
+        return _key_names.ALIASES.get(name, name)
+
+    def key_to_scan_codes(self, name):
+        """The real one raises ``ValueError`` for a name the layout has no key
+        for; the scan codes themselves are never inspected."""
+        if name not in _key_names.VALID_NAMES:
+            raise ValueError(f"Key name {name!r} is not mapped to any known key.")
+        return (0,)
 
 
 class FakeClock:
