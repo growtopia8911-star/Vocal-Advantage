@@ -16,6 +16,36 @@ from vocal_advantage import cuda_dlls
 # test run.
 SAMPLE_RATE: int = 16000
 
+#: Whisper does better on a healthy signal. Kevin's mic peaks around 0.10-0.19
+#: -- roughly 15% of the available range -- and simply scaling his recordings
+#: up scored 8.8% against 9.9% on the same clips with the same model. Free
+#: accuracy, so it happens on every utterance.
+TARGET_PEAK: float = 0.5
+#: Never boost more than this. Digital gain lifts the room noise along with
+#: the voice, and a near-silent clip multiplied a hundredfold is a
+#: hallucination generator, not a transcript.
+MAX_GAIN: float = 8.0
+#: Below this the clip is silence, not quiet speech. Leave it be.
+SILENCE_PEAK: float = 0.005
+
+
+def normalise_level(audio: np.ndarray) -> np.ndarray:
+    """Bring quiet audio up towards TARGET_PEAK. Never attenuates.
+
+    Attenuating a healthy signal risks nothing but gains nothing, and clipping
+    a loud one would be a self-inflicted wound -- so this only ever boosts.
+    """
+    if audio is None or audio.size == 0:
+        return audio
+    peak = float(np.max(np.abs(audio)))
+    if peak < SILENCE_PEAK:
+        return audio
+    gain = min(TARGET_PEAK / peak, MAX_GAIN)
+    if gain <= 1.0:
+        return audio
+    return np.clip(audio * gain, -1.0, 1.0).astype(np.float32, copy=False)
+
+
 # Hallucination guard #3 from the spec. Whisper invents "Thank you." out of
 # silence; such segments score high on no_speech_prob AND low on avg_logprob.
 # Both must be true -- quiet-but-real speech regularly trips one alone.
@@ -207,7 +237,9 @@ class Transcriber:
 
     def _run(self, audio: np.ndarray) -> str:
         model = self._ensure_model()
-        segments, _info = model.transcribe(audio, **self._transcribe_kwargs())
+        segments, _info = model.transcribe(
+            normalise_level(audio), **self._transcribe_kwargs()
+        )
         # The return is a lazy generator -- consume it now or no work happens.
         segments = list(segments)
         return assemble_text(segments, on_dropped=self._report_dropped)

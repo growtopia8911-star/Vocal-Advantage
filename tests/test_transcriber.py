@@ -13,6 +13,7 @@ from vocal_advantage import transcriber
 from vocal_advantage import transcriber as transcriber_module
 from vocal_advantage.transcriber import (
     SAMPLE_RATE,
+    normalise_level,
     Transcriber,
     assemble_text,
     keep_segment,
@@ -480,3 +481,39 @@ def test_asking_for_cuda_explicitly_on_a_mac_still_tries_and_warns(monkeypatch):
     monkeypatch.setattr(transcriber.sys, "platform", "darwin")
     t = Transcriber("base", "cuda", "en", 0.4)
     assert t._device_plan()[0] == ("cuda", "int8_float16")
+
+
+# -- input level ------------------------------------------------------------
+
+
+def test_quiet_audio_is_brought_up_before_transcription():
+    """Kevin's recordings peaked at 0.10-0.19 -- about 15% of the available
+    range. Scaling them up scored 8.8% against 9.9% on the same clips with the
+    same model, which is a larger gain than moving base -> small cost him in
+    speed."""
+    quiet = (np.sin(np.linspace(0, 400, SAMPLE_RATE)) * 0.1).astype(np.float32)
+    louder = normalise_level(quiet)
+    assert float(np.max(np.abs(louder))) == pytest.approx(0.5, abs=0.01)
+
+
+def test_audio_that_is_already_loud_is_left_alone():
+    """Never attenuate: clipping a good signal would be a self-inflicted wound."""
+    loud = (np.sin(np.linspace(0, 400, SAMPLE_RATE)) * 0.8).astype(np.float32)
+    assert np.array_equal(normalise_level(loud), loud)
+
+
+def test_silence_is_not_amplified_into_noise():
+    """A silent room scaled up 100x is a hallucination generator."""
+    silence = np.full(SAMPLE_RATE, 0.0005, dtype=np.float32)
+    assert np.array_equal(normalise_level(silence), silence)
+
+
+def test_the_gain_is_capped():
+    """Very quiet speech gets help, but not unlimited help -- the noise floor
+    comes up with the voice."""
+    faint = (np.sin(np.linspace(0, 400, SAMPLE_RATE)) * 0.01).astype(np.float32)
+    assert float(np.max(np.abs(normalise_level(faint)))) < 0.5
+
+
+def test_an_empty_array_is_handled():
+    assert normalise_level(np.empty(0, dtype=np.float32)).size == 0
