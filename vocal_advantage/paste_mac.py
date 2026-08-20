@@ -27,6 +27,7 @@ import time
 from vocal_advantage.paste_core import (  # noqa: F401
     CLIPBOARD_ATTEMPTS,
     type_with,
+    type_partial as _type_partial,
     CLIPBOARD_RETRY_S,
     CLIPBOARD_SETTLE_S,
     KEY_INTERVAL_S,
@@ -249,6 +250,13 @@ def paste_text(text: str, *, backend: PasteBackend | None = None) -> bool:
     if backend is None:
         backend = _default_backend()
     return type_with(text, backend)
+
+
+def type_partial(text: str, *, backend: PasteBackend | None = None) -> bool:
+    """Type settled words while the user is still speaking. See paste_core."""
+    if backend is None:
+        backend = _default_backend()
+    return _type_partial(text, backend)
 
 
 def paste_via_clipboard(text: str, *, backend: PasteBackend | None = None) -> bool:

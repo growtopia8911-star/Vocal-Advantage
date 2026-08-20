@@ -17,6 +17,7 @@ here needs to be.
 from __future__ import annotations
 
 import time
+import traceback
 from collections.abc import Callable
 from enum import Enum, auto
 from typing import Any, Protocol
@@ -76,6 +77,7 @@ class DictationController:
         min_duration_s: float,
         max_duration_s: float,
         clock: Callable[[], float] = time.monotonic,
+        on_partial: Callable[[], None] | None = None,
     ) -> None:
         self._hotkey = hotkey
         self._recorder = recorder
@@ -85,6 +87,7 @@ class DictationController:
         self._min_duration_s = float(min_duration_s)
         self._max_duration_s = float(max_duration_s)
         self._clock = clock
+        self._on_partial = on_partial
 
         self.state: State = State.IDLE
         # Which of the hotkey's own keys are currently down.  Only hotkey keys
@@ -109,9 +112,24 @@ class DictationController:
             self._handle_up(key)
 
     def tick(self) -> None:
-        """Watchdog, called about once a second.  Cheap and safe in any state."""
+        """Watchdog, called regularly.  Cheap and safe in any state.
+
+        Also drives live dictation: while RECORDING, ``on_partial`` runs on each
+        tick so a caller can transcribe the audio so far and type the words that
+        have settled. Callers wanting that set a shorter tick interval.
+        """
         if self.state is not State.RECORDING:
             return
+
+        if self._on_partial is not None:
+            try:
+                self._on_partial()
+            except Exception:  # noqa: BLE001
+                # A partial pass is a nicety; the real transcript arrives on
+                # release. Losing what someone just said because a preview
+                # failed would be unforgivable, so this never propagates.
+                traceback.print_exc()
+
         # SPEC.md: a 300s watchdog force-stops a forgotten recording *and
         # processes it* -- the audio is not thrown away.
         if self._clock() - self._started_at >= self._max_duration_s:

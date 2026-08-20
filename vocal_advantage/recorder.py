@@ -106,6 +106,22 @@ class Recorder:
             return np.empty(0, dtype=np.float32)
         return np.concatenate(chunks).astype(np.float32, copy=False)
 
+    def snapshot(self) -> np.ndarray:
+        """Everything captured so far, without stopping the recording.
+
+        Live dictation re-transcribes the audio so far, over and over, while the
+        user is still speaking; calling stop() to read it would end the
+        recording. Non-destructive: stop() still returns the whole thing.
+
+        Runs on the controller thread while PortAudio's thread is appending, so
+        it takes the same lock the callback does.
+        """
+        with self._lock:
+            chunks = list(self._chunks)
+        if not chunks:
+            return np.empty(0, dtype=np.float32)
+        return np.concatenate(chunks).astype(np.float32, copy=False)
+
     def _callback(self, indata, frames, time_info, status) -> None:
         """Called on PortAudio's own thread, once per 1024-frame block.
 

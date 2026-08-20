@@ -378,3 +378,82 @@ def test_missing_sounddevice_raises_a_clear_error(monkeypatch):
         Recorder().start()
 
     assert "sounddevice" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Reading the recording while it is still going (live dictation)
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_returns_what_has_been_captured_without_stopping(fake_sd):
+    """Live dictation transcribes the audio so far, repeatedly, while the user
+    is still talking. Stopping to read it would end the recording."""
+    rec = Recorder()
+    rec.start()
+    fake_sd.stream.feed([0.1, 0.2])
+
+    audio = rec.snapshot()
+
+    np.testing.assert_allclose(audio, [0.1, 0.2], rtol=1e-6)
+    assert rec.is_recording is True, "reading must not close the microphone"
+    assert fake_sd.stream.closed is False
+
+
+def test_snapshot_grows_as_more_audio_arrives(fake_sd):
+    rec = Recorder()
+    rec.start()
+    fake_sd.stream.feed([0.1])
+    first = rec.snapshot()
+    fake_sd.stream.feed([0.2])
+    second = rec.snapshot()
+
+    np.testing.assert_allclose(first, [0.1], rtol=1e-6)
+    np.testing.assert_allclose(second, [0.1, 0.2], rtol=1e-6)
+
+
+def test_snapshot_does_not_consume_the_audio(fake_sd):
+    """stop() must still return the whole recording afterwards."""
+    rec = Recorder()
+    rec.start()
+    fake_sd.stream.feed([0.1, 0.2])
+    rec.snapshot()
+    fake_sd.stream.feed([0.3])
+
+    np.testing.assert_allclose(rec.stop(), [0.1, 0.2, 0.3], rtol=1e-6)
+
+
+def test_snapshot_before_anything_is_captured_is_empty(fake_sd):
+    rec = Recorder()
+    assert rec.snapshot().size == 0
+    assert rec.snapshot().dtype == np.float32
+    rec.start()
+    assert rec.snapshot().size == 0
+
+
+def test_snapshot_is_safe_while_the_audio_thread_is_delivering(fake_sd):
+    """It runs on the controller thread while PortAudio's thread appends."""
+    rec = Recorder()
+    rec.start()
+    callback = fake_sd.stream.kwargs["callback"]
+    stop = threading.Event()
+
+    def feeder():
+        # Bounded: the point is that the two threads overlap, not that the
+        # buffer grows huge. snapshot() concatenates what it finds, so an
+        # unbounded feeder makes this test quadratic and slow.
+        block = np.full((16, 1), 0.5, dtype=np.float32)
+        for _ in range(200):
+            if stop.is_set():
+                return
+            callback(block, 16, None, 0)
+
+    thread = threading.Thread(target=feeder)
+    thread.start()
+    try:
+        for _ in range(50):
+            audio = rec.snapshot()
+            assert audio.dtype == np.float32
+            assert audio.ndim == 1
+    finally:
+        stop.set()
+        thread.join()

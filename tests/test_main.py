@@ -22,6 +22,7 @@ import sys
 import threading
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from vocal_advantage import main as va_main
@@ -645,3 +646,103 @@ def test_it_passes_warm_up_through():
     inner = Warms()
     va_main.NarratingTranscriber(inner).warm_up()
     assert inner.warmed is True
+
+
+# --------------------------------------------------------------------------
+# Live dictation
+# --------------------------------------------------------------------------
+
+
+class _FakeRec:
+    def __init__(self):
+        self.buffer = np.zeros(0, dtype=np.float32)
+
+    def snapshot(self):
+        return self.buffer
+
+    def say(self, seconds):
+        self.buffer = np.zeros(int(16000 * seconds), dtype=np.float32)
+
+
+class _ScriptedTranscriber:
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.calls = 0
+
+    def transcribe(self, audio):
+        self.calls += 1
+        return self.answers.pop(0) if self.answers else ""
+
+
+def _live(answers):
+    rec = _FakeRec()
+    tr = _ScriptedTranscriber(answers)
+    typed, final = [], []
+    live = va_main.LiveDictation(
+        recorder=rec,
+        transcriber=tr,
+        type_partial=lambda t: typed.append(t) or True,
+        type_final=lambda t: final.append(t) or True,
+    )
+    return live, rec, tr, typed, final
+
+
+def test_a_partial_pass_is_skipped_until_there_is_enough_audio():
+    """Transcribing a fifth of a second wastes time and tells you nothing."""
+    live, rec, tr, typed, _ = _live(["hello"])
+    rec.say(0.2)
+    live.on_partial()
+    assert tr.calls == 0
+    assert typed == []
+
+
+def test_words_are_typed_once_two_passes_agree():
+    live, rec, tr, typed, _ = _live(["hello there", "hello there"])
+    rec.say(2.0)
+    live.on_partial()
+    assert typed == [], "one pass proves nothing"
+    live.on_partial()
+    assert typed == ["hello there"]
+
+
+def test_the_final_transcript_types_only_what_is_still_owed():
+    live, rec, tr, typed, final = _live(["one two", "one two"])
+    rec.say(2.0)
+    live.on_partial()
+    live.on_partial()
+    assert typed == ["one two"]
+
+    assert live.paste_text("one two three") is True
+    assert final == [" three"], "the already-typed words must not repeat"
+
+
+def test_a_dictation_with_no_partials_types_the_whole_thing():
+    live, rec, tr, typed, final = _live([])
+    assert live.paste_text("hello world") is True
+    assert final == ["hello world"]
+
+
+def test_it_reports_success_when_the_partials_already_typed_everything():
+    """Nothing left to type is a success, not a failed paste -- the controller
+    would otherwise flash 'could not paste' at a dictation that worked."""
+    live, rec, tr, typed, final = _live(["all done", "all done"])
+    rec.say(2.0)
+    live.on_partial()
+    live.on_partial()
+
+    assert live.paste_text("all done") is True
+    assert final == []
+
+
+def test_each_dictation_starts_clean():
+    live, rec, tr, typed, final = _live(["one", "one", "two", "two"])
+    rec.say(2.0)
+    live.on_partial()
+    live.on_partial()
+    live.paste_text("one")
+
+    rec.buffer = np.zeros(0, dtype=np.float32)   # the recorder starts over
+    rec.say(2.0)
+    live.on_partial()
+    live.on_partial()
+    assert typed == ["one", "two"], "the second dictation must not repeat the first"

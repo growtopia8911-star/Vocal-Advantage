@@ -499,3 +499,79 @@ def test_the_next_hold_after_a_failed_start_records_normally():
 
     assert rig.log == STARTED + PASTED
     assert rig.controller.state is State.IDLE
+
+
+# ---------------------------------------------------------------------------
+# Live dictation: a hook that runs on each tick while recording
+# ---------------------------------------------------------------------------
+
+
+def test_no_partial_hook_means_nothing_changes():
+    """Windows passes no hook, so its behaviour must be untouched."""
+    rig = Rig("f8")
+    rig.drive([("down", "f8"), ("tick",), ("tick",), ("wait", 1.0), ("up", "f8")])
+    assert rig.log == STARTED + PASTED
+
+
+def _rig_with_partial(hotkey="f8", **kwargs):
+    rig = Rig(hotkey, **kwargs)
+    calls = []
+    rig.controller = DictationController(
+        hotkey=parse_hotkey(hotkey),
+        recorder=rig.recorder,
+        transcriber=rig.transcriber,
+        paster=rig.paster,
+        indicator=rig.indicator,
+        min_duration_s=0.4,
+        max_duration_s=300.0,
+        clock=rig.clock,
+        on_partial=lambda: calls.append(rig.controller.state),
+    )
+    return rig, calls
+
+
+def test_the_partial_hook_runs_on_every_tick_while_recording():
+    rig, calls = _rig_with_partial()
+    rig.drive([("down", "f8"), ("tick",), ("tick",), ("tick",)])
+    assert calls == [State.RECORDING] * 3
+
+
+def test_the_partial_hook_does_not_run_while_idle():
+    """Nothing is being said, so there is nothing to transcribe."""
+    rig, calls = _rig_with_partial()
+    rig.drive([("tick",), ("tick",)])
+    assert calls == []
+
+
+def test_the_partial_hook_does_not_run_after_the_key_is_released():
+    rig, calls = _rig_with_partial()
+    rig.drive([("down", "f8"), ("tick",), ("wait", 1.0), ("up", "f8"), ("tick",)])
+    assert calls == [State.RECORDING], "one tick while held, none afterwards"
+
+
+def test_a_failing_partial_hook_does_not_break_the_dictation():
+    """A partial pass is a nicety. If it throws, the real transcript on release
+    still has to arrive -- losing what someone just said is unforgivable."""
+    rig = Rig("f8")
+    rig.controller = DictationController(
+        hotkey=parse_hotkey("f8"),
+        recorder=rig.recorder,
+        transcriber=rig.transcriber,
+        paster=rig.paster,
+        indicator=rig.indicator,
+        min_duration_s=0.4,
+        max_duration_s=300.0,
+        clock=rig.clock,
+        on_partial=lambda: (_ for _ in ()).throw(RuntimeError("partial blew up")),
+    )
+    rig.drive([("down", "f8"), ("tick",), ("wait", 1.0), ("up", "f8")])
+
+    assert rig.log == STARTED + PASTED
+    assert rig.controller.state is State.IDLE
+
+
+def test_the_watchdog_still_fires_with_a_partial_hook_attached():
+    rig, calls = _rig_with_partial()
+    rig.drive([("down", "f8"), ("wait", 301.0), ("tick",)])
+    assert rig.controller.state is State.IDLE
+    assert "transcriber.transcribe" in rig.log

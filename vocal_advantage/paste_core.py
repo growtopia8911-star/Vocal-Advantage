@@ -134,6 +134,27 @@ def paste_with(
         injection_active.clear()
 
 
+def type_partial(text: str, backend) -> bool:
+    """Type words mid-dictation, while the user is still holding the hotkey.
+
+    Two deliberate differences from ``type_with``:
+
+    * **The injection gate stays down.** The gate makes the key hook ignore
+      every event while it is up. During a partial the user is still holding the
+      hotkey, so raising it risks swallowing their release -- and a recording
+      that never stops is a far worse bug than the one the gate prevents.
+      Platforms that stamp their synthetic events (macOS does) keep their own
+      keystrokes out of the hook exactly, without a gate.
+    * **It does not wait for modifiers to release.** It cannot: the modifier it
+      would wait for is the hotkey itself, still held. Safe only because typed
+      events carry cleared flags, so the held modifier does not combine with
+      them -- verified on macOS before this was written.
+    """
+    if not text.strip():
+        return False
+    return bool(backend.send_text(text))
+
+
 def type_with(text: str, backend) -> bool:
     """Type the text straight in, never touching the clipboard.
 

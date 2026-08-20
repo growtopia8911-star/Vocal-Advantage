@@ -394,3 +394,37 @@ def test_unicode_survives_being_typed(fake_quartz):
     paste_mac.MacBackend().send_text("naive cafe -- ni hao")
     typed = "".join(e.unicode for e in fake_quartz.posted if e.down)
     assert typed == "naive cafe -- ni hao"
+
+
+def test_typing_a_partial_never_raises_the_injection_gate():
+    """The live-dictation case, and the gate would be actively harmful here.
+
+    During a partial the user is still HOLDING the hotkey. The gate makes the
+    key hook ignore every event while it is up -- so if it were raised when they
+    released the key, the release would be swallowed and the recording would
+    never stop. Stamping each event is what keeps our own keystrokes out of the
+    hook instead, and unlike the gate it is exact.
+    """
+    fake = TypingFakeBackend()
+
+    assert paste_mac.type_partial("hello", backend=fake) is True
+
+    assert not any(fake.flag_seen), "the gate must stay down for a partial"
+    assert not paste_mac.injection_active.is_set()
+    assert fake.typed == ["hello"]
+
+
+def test_a_partial_still_waits_for_no_modifier_it_can_control():
+    """It cannot wait for the hotkey to be released -- that is the whole point,
+    the user is still holding it. So a partial types straight away."""
+    fake = TypingFakeBackend(modifier_polls_held=10**6)
+
+    assert paste_mac.type_partial("hello", backend=fake) is True
+
+    assert [e[0] for e in fake.log] == ["typed"]
+
+
+def test_the_final_paste_still_raises_the_gate():
+    fake = TypingFakeBackend()
+    paste_mac.paste_text("hello", backend=fake)
+    assert all(fake.flag_seen)

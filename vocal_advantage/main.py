@@ -27,6 +27,7 @@ from vocal_advantage import cuda_dlls
 from vocal_advantage.config import CONFIG_PATH, load_config, save_config
 from vocal_advantage.controller import DictationController
 from vocal_advantage.hotkey_spec import HotkeyError, HotkeySpec, parse_hotkey
+from vocal_advantage.streaming import StreamingTranscript
 
 VERSION = "0.1.0"
 
@@ -37,6 +38,10 @@ MUTEX_NAME = r"Local\VocalAdvantageSingleInstance"
 ERROR_ALREADY_EXISTS = 183
 
 TICK_INTERVAL_S = 1.0  # how often the controller's 300s watchdog gets a chance to fire
+# Live dictation transcribes the audio so far on every tick, so the tick has to
+# be quick enough to feel live and slow enough not to spend the whole CPU
+# re-transcribing. At 0.5s a pass on `tiny` costs ~0.2s -- comfortable.
+LIVE_TICK_S = 0.5
 UI_PUMP_MS = 50        # how often tkinter drains the indicator's queue
 HEARTBEAT_MS = 200     # keeps Ctrl+C responsive and notices a dead controller thread
 
@@ -112,6 +117,60 @@ class NarratingTranscriber:
         seconds = len(audio) / self.SAMPLE_RATE
         print(f"  [heard {seconds:.1f}s of audio in {took:.2f}s] {text!r}", flush=True)
         return text
+
+
+class LiveDictation:
+    """Types words as they settle, while the user is still speaking.
+
+    Sits in two places at once, which is the whole trick:
+
+    * ``on_partial`` runs on each controller tick while RECORDING. It
+      transcribes the audio so far and types whichever words two consecutive
+      passes agree on.
+    * ``paste_text`` satisfies the paster protocol, so when the key is released
+      and the controller delivers the final transcript, this types only the part
+      the partial passes have not already typed.
+
+    Without the second half the whole dictation would be typed twice.
+    """
+
+    SAMPLE_RATE = 16000
+    #: Below this there is not enough audio for a pass to tell you anything,
+    #: and running the model on it is pure waste.
+    MIN_AUDIO_S = 0.8
+
+    def __init__(self, *, recorder, transcriber, type_partial, type_final) -> None:
+        self._recorder = recorder
+        self._transcriber = transcriber
+        self._type_partial = type_partial
+        self._type_final = type_final
+        self._session = StreamingTranscript()
+        self._last_samples = 0
+
+    def on_partial(self) -> None:
+        audio = self._recorder.snapshot()
+        # The buffer shrinking means the recorder started a fresh recording --
+        # a previous one was cancelled without ever reaching paste_text.
+        if audio.size < self._last_samples:
+            self._session.reset()
+        self._last_samples = audio.size
+
+        if audio.size < int(self.MIN_AUDIO_S * self.SAMPLE_RATE):
+            return
+        fresh = self._session.commit(self._transcriber.transcribe(audio))
+        if fresh:
+            self._type_partial(fresh)
+
+    def paste_text(self, text: str) -> bool:
+        """The controller's final delivery: type whatever is still owed."""
+        remaining = self._session.finish(text)
+        self._session.reset()
+        self._last_samples = 0
+        if not remaining:
+            # Everything was already typed live. That is a success; reporting
+            # failure would flash "could not paste" at a dictation that worked.
+            return True
+        return bool(self._type_final(remaining))
 
 
 class ConsoleIndicator:
@@ -509,14 +568,23 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     print("Model ready.")
 
     recorder = Recorder()
+    # The raw transcriber for partial passes: narrating every one of them would
+    # bury the console. The final transcript still gets reported.
+    live = LiveDictation(
+        recorder=recorder,
+        transcriber=transcriber,
+        type_partial=paste_mac.type_partial,
+        type_final=paste_mac.paste_text,
+    )
     controller = DictationController(
         hotkey=spec,
         recorder=recorder,
         transcriber=NarratingTranscriber(transcriber),
-        paster=paste_mac,
+        paster=live,
         indicator=indicator,
         min_duration_s=float(cfg["min_duration_s"]),
         max_duration_s=float(cfg["max_duration_s"]),
+        on_partial=live.on_partial,
     )
 
     events: "queue.Queue" = queue.Queue()
@@ -524,6 +592,7 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     worker = threading.Thread(
         target=controller_loop,
         args=(controller, events, stop_event),
+        kwargs={"tick_interval_s": LIVE_TICK_S},
         name="vocal-advantage-controller",
         daemon=True,
     )
