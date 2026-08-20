@@ -17,14 +17,23 @@ sequencing is testable with a fake and this module imports on any OS.
 from __future__ import annotations
 
 import ctypes
-import threading
 import time
-from typing import Protocol
 
-# The hotkey hook (hotkey_win) drops every key event while this is set. It is
-# the load-bearing guard, not "we press a different Ctrl than you do": the
-# hotkey is user-configurable, so the user may well have chosen Left Ctrl.
-injection_active = threading.Event()
+# Re-exported, not redefined: the sequence and its delays are identical on both
+# platforms and live in paste_core, which also owns the ONE injection flag the
+# key hook watches. Existing callers import these names from here.
+from vocal_advantage.paste_core import (  # noqa: F401
+    CLIPBOARD_ATTEMPTS,
+    CLIPBOARD_RETRY_S,
+    CLIPBOARD_SETTLE_S,
+    KEY_INTERVAL_S,
+    MODIFIER_POLL_S,
+    MODIFIER_WAIT_S,
+    POST_PASTE_S,
+    PasteBackend,
+    injection_active,
+    paste_with,
+)
 
 # --- Win32 constants --------------------------------------------------------
 CF_UNICODETEXT = 13
@@ -110,16 +119,6 @@ class INPUT(ctypes.Structure):
     # _anonymous_ must be set before _fields_; it is what makes `inp.ki` work.
     _anonymous_ = ("u",)
     _fields_ = [("type", _DWORD), ("u", _INPUTUNION)]
-
-
-# --- timings (SPEC.md "Paste sequence") -------------------------------------
-MODIFIER_WAIT_S = 2.0  # cap on waiting for physically held modifiers
-MODIFIER_POLL_S = 0.01
-CLIPBOARD_ATTEMPTS = 5  # OpenClipboard races the Win+V history process
-CLIPBOARD_RETRY_S = 0.05
-CLIPBOARD_SETTLE_S = 0.1  # apps fetch the clipboard lazily
-KEY_INTERVAL_S = 0.02
-POST_PASTE_S = 0.06
 
 
 # --- the Windows layer ------------------------------------------------------
@@ -289,7 +288,7 @@ class Win32Backend:
         return _send_key(self._user32, vk, down)
 
 
-# --- the paste sequence -----------------------------------------------------
+# --- the Windows paste chord ------------------------------------------------
 CTRL_V_SEQUENCE = (
     # Left Ctrl specifically: Right Ctrl is an extended key and some apps treat
     # the two differently, while Left Ctrl is what every paste handler expects.
@@ -298,26 +297,6 @@ CTRL_V_SEQUENCE = (
     (VK_V, False),
     (VK_LCONTROL, False),
 )
-
-
-class PasteBackend(Protocol):
-    """Everything paste_text needs from the outside world.
-
-    Win32Backend is the real one; tests pass a fake with a virtual clock.
-    """
-
-    def monotonic(self) -> float: ...
-
-    def sleep(self, seconds: float) -> None: ...
-
-    def modifiers_down(self) -> bool: ...
-
-    def set_clipboard(self, text: str) -> None:
-        """Raise OSError if the clipboard could not be written."""
-
-    def send_key(self, vk: int, down: bool) -> int:
-        """Return the number of events actually inserted (0 = refused)."""
-
 
 _DEFAULT_BACKEND: PasteBackend | None = None
 
@@ -330,45 +309,6 @@ def _default_backend() -> PasteBackend:
     return _DEFAULT_BACKEND
 
 
-def _wait_for_modifier_release(backend: PasteBackend) -> bool:
-    """Block until no modifier is physically held, or MODIFIER_WAIT_S passes.
-
-    Returns whether they actually released. We paste either way: a user who
-    leans on Shift for two seconds should get a wrong-looking paste, not a
-    frozen app.
-    """
-    deadline = backend.monotonic() + MODIFIER_WAIT_S
-    while backend.modifiers_down():
-        if backend.monotonic() >= deadline:
-            return False
-        backend.sleep(MODIFIER_POLL_S)
-    return True
-
-
-def _set_clipboard_with_retry(backend: PasteBackend, text: str) -> bool:
-    for attempt in range(CLIPBOARD_ATTEMPTS):
-        try:
-            backend.set_clipboard(text)
-            return True
-        except OSError:
-            if attempt == CLIPBOARD_ATTEMPTS - 1:
-                return False
-            backend.sleep(CLIPBOARD_RETRY_S)
-    return False
-
-
-def _send_ctrl_v(backend: PasteBackend) -> bool:
-    """Inject Ctrl down, V down, V up, Ctrl up. True if all four landed."""
-    inserted_everything = True
-    last = len(CTRL_V_SEQUENCE) - 1
-    for index, (vk, down) in enumerate(CTRL_V_SEQUENCE):
-        if backend.send_key(vk, down) == 0:
-            inserted_everything = False
-        if index < last:
-            backend.sleep(KEY_INTERVAL_S)
-    return inserted_everything
-
-
 def paste_text(text: str, *, backend: PasteBackend | None = None) -> bool:
     """Put text on the clipboard and paste it into the focused window.
 
@@ -379,21 +319,4 @@ def paste_text(text: str, *, backend: PasteBackend | None = None) -> bool:
     """
     if backend is None:
         backend = _default_backend()
-    if not text.strip():
-        return False
-
-    injection_active.set()
-    try:
-        _wait_for_modifier_release(backend)
-        if not _set_clipboard_with_retry(backend, text):
-            return False
-        backend.sleep(CLIPBOARD_SETTLE_S)
-        pasted = _send_ctrl_v(backend)
-        # Keep the guard up a little longer so the hotkey hook sees and drops
-        # our own injected key events before it starts listening again.
-        backend.sleep(POST_PASTE_S)
-        return pasted
-    finally:
-        # Always, even on an unexpected exception: a stuck flag would make the
-        # hotkey stop working entirely until restart.
-        injection_active.clear()
+    return paste_with(text, backend, CTRL_V_SEQUENCE)
