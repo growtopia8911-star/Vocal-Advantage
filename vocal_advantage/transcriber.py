@@ -31,11 +31,20 @@ def keep_segment(seg) -> bool:
     )
 
 
-def assemble_text(segments: Iterable) -> str:
-    """Kept segments, each stripped, joined by single spaces. "" if none."""
+def assemble_text(segments: Iterable, on_dropped=None) -> str:
+    """Kept segments, each stripped, joined by single spaces. "" if none.
+
+    ``on_dropped`` is called with every segment the guard bins. Silence here
+    is dangerous: the guard exists to delete Whisper's invented "Thank you."
+    from a quiet room, but it deletes by the same rule a real quiet phrase
+    the model was unsure about -- and half a missing sentence then looks
+    exactly like the microphone having missed it.
+    """
     kept = []
     for seg in segments:
         if not keep_segment(seg):
+            if on_dropped is not None:
+                on_dropped(seg)
             continue
         text = seg.text.strip()
         if text:
@@ -189,7 +198,20 @@ class Transcriber:
         segments, _info = model.transcribe(audio, **self._transcribe_kwargs())
         # The return is a lazy generator -- consume it now or no work happens.
         segments = list(segments)
-        return assemble_text(segments)
+        return assemble_text(segments, on_dropped=self._report_dropped)
+
+    @staticmethod
+    def _report_dropped(seg) -> None:
+        """Say so on the console when the silence guard bins real-looking text."""
+        text = (getattr(seg, "text", "") or "").strip()
+        if not text:
+            return  # binning an empty segment is not worth a line of output
+        print(
+            f"  [dropped as silence: {text!r} "
+            f"(no_speech {getattr(seg, 'no_speech_prob', float('nan')):.2f}, "
+            f"logprob {getattr(seg, 'avg_logprob', float('nan')):.2f})]",
+            flush=True,
+        )
 
     def warm_up(self) -> None:
         """Pay the 1-3s CUDA init cost at startup, not mid-dictation."""

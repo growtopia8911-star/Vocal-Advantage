@@ -317,6 +317,9 @@ def test_every_dictation_is_logged_as_one_json_line(tmp_path):
     assert second["failed_check"]
     for entry in (first, second):
         assert entry["rules_only_output"] == RULES_ONLY
+        # Without the raw transcript there is no way to tell "Whisper never
+        # heard it" from "something downstream removed it".
+        assert entry["raw_transcript"] == SAID
         assert isinstance(entry["elapsed_ms"], (int, float))
         assert entry["timestamp"]
 

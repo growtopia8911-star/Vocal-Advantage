@@ -421,6 +421,7 @@ def ai_clean(
         LOG_PATH if log_path is None else log_path,
         {
             "timestamp": datetime.now().astimezone().isoformat(),
+            "raw_transcript": text,
             "rules_only_output": rules_only,
             "model_output": model_output,
             "final_output": final,

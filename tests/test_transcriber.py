@@ -401,3 +401,33 @@ def test_download_note_invents_no_number_for_an_unknown_model():
     note = transcriber.download_note("someone/a-finetune-we-never-shipped")
     assert note.strip()
     assert "MB" not in note and "GB" not in note
+
+
+# -- dropped segments must not be silent ------------------------------------
+
+
+def test_assemble_text_reports_what_it_dropped():
+    """A segment binned as silence is invisible otherwise.
+
+    Kevin said "let's meet Tuesday, no, Wednesday" and only "No Wednesday."
+    reached the document. A guard that deletes half a sentence without saying
+    so makes that indistinguishable from the microphone missing it.
+    """
+    dropped = []
+    segments = [
+        FakeSegment(text="Let's meet Tuesday,", no_speech_prob=0.9, avg_logprob=-1.5),
+        FakeSegment(text="no, Wednesday.", no_speech_prob=0.1, avg_logprob=-0.2),
+    ]
+    text = assemble_text(segments, on_dropped=dropped.append)
+    assert text == "no, Wednesday."
+    assert [seg.text for seg in dropped] == ["Let's meet Tuesday,"]
+
+
+def test_assemble_text_reports_nothing_when_nothing_is_dropped():
+    dropped = []
+    assemble_text([FakeSegment(text="hello")], on_dropped=dropped.append)
+    assert dropped == []
+
+
+def test_assemble_text_still_works_without_a_reporter():
+    assert assemble_text([FakeSegment(text="hello")]) == "hello"
