@@ -95,7 +95,7 @@ def test_answering_the_question_instead_of_cleaning_it_is_rejected():
         "The capital of France is Paris.",
     )
     assert not accepted
-    assert failed in {"invented_words", "question_lost"}, failed
+    assert failed in {"invented_words", "question_lost", "words_lost"}, failed
 
 
 def test_a_paraphrase_at_similar_length_is_rejected():
@@ -184,10 +184,6 @@ GOOD_CLEANUPS = [
     (
         "um so I I think we should uh ship it on friday",
         "So I think we should ship it on Friday.",
-    ),
-    (
-        "meet me tuesday no wednesday",
-        "Meet me Wednesday.",
     ),
     (
         "im not sure if the the build passed",
@@ -370,12 +366,14 @@ def test_the_few_shot_examples_are_sent_as_real_turns(tmp_path):
 # being caught by some other rule first, so neither was guarding anything.
 
 
-def test_invented_words_are_caught_without_help_from_the_question_rule():
-    """'tell me' is not a question opener, so only the invented-word rule can
-    catch the model answering instead of cleaning."""
+def test_invented_words_are_caught_without_help_from_any_other_rule():
+    """Long enough that survival passes and length passes, so only the
+    invented-word rule can catch the facts being made up."""
     accepted, failed = _ok(
-        "so tell me the capital of france",
-        "The capital of France is Paris.",
+        "the migration ran on thursday and the checkout flow broke badly for "
+        "twenty minutes afterwards",
+        "The migration ran on Thursday and the checkout flow broke badly for "
+        "20 minutes afterwards because Redis was misconfigured by Dave.",
     )
     assert not accepted
     assert failed == "invented_words", failed
@@ -435,3 +433,54 @@ def test_warming_up_never_raises_when_ollama_is_missing():
         raise ConnectionRefusedError("nothing there")
 
     assert warm_up_model(post=post) is False
+
+
+# -- short sentences have no spare words -----------------------------------
+
+
+def test_a_correct_short_self_correction_is_rejected_too_and_that_is_the_cost():
+    """The honest price of the rule below.
+
+    "meet me tuesday no wednesday" -> "Meet me Wednesday." is a CORRECT
+    collapse, and it is rejected, because it deletes exactly as many words as
+    the backwards version does. Word counting cannot separate them. Short
+    corrections therefore fall back to rules-only, which keeps both days and
+    lets Kevin see what he said.
+    """
+    accepted, failed = _ok("meet me tuesday no wednesday", "Meet me Wednesday.")
+    assert not accepted
+    assert failed == "words_lost", failed
+
+
+def test_a_self_correction_collapsed_backwards_is_rejected():
+    """The real failure, 2026-08-20. Kevin said "let's meet Tuesday, no,
+    Wednesday"; Whisper heard all of it; the model kept the rejected day and
+    deleted the intended one, and a flat 60% survival rule waved it through
+    because losing one word of four is only 25%."""
+    accepted, failed = _ok(
+        "Let's meet Tuesday. No Wednesday.", "Let's meet Tuesday."
+    )
+    assert not accepted
+    assert failed == "words_lost", failed
+
+
+def test_a_short_sentence_must_keep_every_content_word():
+    accepted, failed = _ok("ship the migration on friday", "Ship the migration.")
+    assert not accepted, failed
+
+
+def test_a_long_sentence_still_tolerates_the_odd_dropped_word():
+    """The strict rule must not leak into long dictation, where a rewrite
+    legitimately rearranges things."""
+    said = (
+        "so we shipped the migration on thursday and the checkout flow broke "
+        "for about twenty minutes before the rollback finished and nobody "
+        "noticed except the oncall engineer"
+    )
+    cleaned = (
+        "We shipped the migration on Thursday and the checkout flow broke for "
+        "about 20 minutes before the rollback finished. Nobody noticed except "
+        "the on-call engineer."
+    )
+    accepted, failed = _ok(said, cleaned)
+    assert accepted, failed

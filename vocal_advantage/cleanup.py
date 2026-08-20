@@ -204,6 +204,9 @@ STOPWORDS: frozenset[str] = frozenset({
     "many", "than", "too", "also", "well", "now", "get", "got", "one", "two",
 })
 
+#: Below this many content words, every one must survive. See check_model_output.
+SHORT_SENTENCE_WORDS: int = 8
+
 _QUESTION_OPENERS: frozenset[str] = frozenset({
     "what", "whats", "who", "whos", "where", "wheres", "when", "whens", "why",
     "how", "hows", "which", "is", "are", "can", "could", "should", "would",
@@ -320,8 +323,20 @@ def check_model_output(said: str, output: str) -> tuple[bool, str | None]:
     said_set, out_set = set(said_content), set(out_content)
 
     if said_set:
+        # A short sentence has no spare words. Kevin said "let's meet Tuesday,
+        # no, Wednesday"; the model kept the rejected day and deleted the
+        # intended one, and a flat 60% waved it through -- losing one word of
+        # four is only 25%. The cost of that error is a meeting on the wrong
+        # day; the cost of being strict is a slightly less tidy sentence.
+        #
+        # This does mean short self-corrections stop collapsing at all: no
+        # word-counting rule can tell "keep the correction" from "keep the
+        # thing that was corrected", because they delete the same number of
+        # words. Long dictation keeps the looser rule, where a rewrite really
+        # does rearrange things.
+        required = 1.0 if len(said_set) < SHORT_SENTENCE_WORDS else 0.60
         survived = len(said_set & out_set) / len(said_set)
-        if survived < 0.60:
+        if survived < required:
             return False, "words_lost"
 
     if out_content:

@@ -86,3 +86,33 @@ Both candidate models tried to answer the transcript rather than clean it:
 
 Which is precisely the failure Kevin predicted when specifying the check, and
 the reason no length-based rule alone would be enough.
+
+---
+
+## The guard failed once, on real hardware (2026-08-20)
+
+Kevin dictated "let's meet Tuesday, no, Wednesday". The log:
+
+    raw   : "Let's meet Tuesday. No Wednesday."   Whisper heard all of it
+    rules : "Let's meet Tuesday. No Wednesday."   rules kept all of it
+    model : "Let's meet Tuesday."                 the AI deleted the correction
+    TYPED : "Let's meet Tuesday."                 and the guard accepted it
+
+The model collapsed the self-correction **backwards** — keeping the rejected
+day, deleting the intended one. A meeting on the wrong day, typed with no
+warning.
+
+The flat 60% survival rule allowed it: losing "Wednesday" from four content
+words is 25%, well inside a 40% allowance. **Proportional thresholds are
+meaningless on short sentences**, where every word is load-bearing.
+
+Now: inputs under 8 content words must keep **all** of them; longer ones keep
+the 60% rule, where a genuine rewrite does rearrange things.
+
+**The cost, stated plainly.** Correct short collapses are rejected too —
+"meet me tuesday no wednesday" -> "Meet me Wednesday." deletes exactly as many
+words as the backwards version, so no word-counting rule can separate them.
+Short self-corrections now fall back to rules-only, which keeps both days and
+lets Kevin see what he said. Measured over 12 ordinary dictations: 9 kept,
+down from 10. One good cleanup lost, one whole class of wrong-meaning output
+prevented.
