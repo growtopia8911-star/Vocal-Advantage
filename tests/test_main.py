@@ -577,3 +577,71 @@ def test_run_app_dispatches_to_the_right_platform(monkeypatch):
     va_main.run_app(Path("ignored.json"))
 
     assert calls == ["mac" if sys.platform == "darwin" else "win"]
+
+
+# --------------------------------------------------------------------------
+# Reporting what was heard
+# --------------------------------------------------------------------------
+
+
+class _EchoTranscriber:
+    def __init__(self, text):
+        self.text = text
+        self.calls = 0
+
+    def transcribe(self, audio):
+        self.calls += 1
+        return self.text
+
+
+def test_the_narrating_transcriber_returns_the_text_untouched():
+    """It is a reporter, not a participant: whatever the real transcriber says
+    must reach the controller byte for byte."""
+    import numpy as np
+
+    inner = _EchoTranscriber("hello there")
+    wrapped = va_main.NarratingTranscriber(inner)
+
+    assert wrapped.transcribe(np.zeros(16000, dtype=np.float32)) == "hello there"
+    assert inner.calls == 1
+
+
+def test_it_reports_the_transcript_and_how_long_it_took(capsys):
+    import numpy as np
+
+    wrapped = va_main.NarratingTranscriber(_EchoTranscriber("hello there"))
+    wrapped.transcribe(np.zeros(32000, dtype=np.float32))  # 2.0s at 16kHz
+
+    out = capsys.readouterr().out
+    assert "hello there" in out, "we need to see what it heard"
+    assert "2.0s" in out, "and how much audio that was"
+
+
+def test_it_survives_a_transcriber_that_raises(capsys):
+    """The controller already handles a failing transcriber; the reporter must
+    not turn that into a different, unhandled failure."""
+    import numpy as np
+
+    class Exploding:
+        def transcribe(self, audio):
+            raise RuntimeError("boom")
+
+    wrapped = va_main.NarratingTranscriber(Exploding())
+    with pytest.raises(RuntimeError):
+        wrapped.transcribe(np.zeros(16000, dtype=np.float32))
+
+
+def test_it_passes_warm_up_through():
+    class Warms:
+        def __init__(self):
+            self.warmed = False
+
+        def warm_up(self):
+            self.warmed = True
+
+        def transcribe(self, audio):
+            return ""
+
+    inner = Warms()
+    va_main.NarratingTranscriber(inner).warm_up()
+    assert inner.warmed is True

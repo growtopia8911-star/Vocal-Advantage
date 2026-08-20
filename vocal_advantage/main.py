@@ -83,6 +83,37 @@ def platform_modules():
     return hotkey_win, paste_win
 
 
+class NarratingTranscriber:
+    """Wraps a transcriber to report what it heard and how long it took.
+
+    A reporter, not a participant: the text passes through byte for byte and
+    exceptions propagate unchanged, because the controller already knows how to
+    handle a transcriber that fails.
+
+    Worth having permanently. "It felt slow" and "it got the words wrong" are
+    the two things users report, and neither is diagnosable without seeing the
+    transcript and the timing side by side.
+    """
+
+    SAMPLE_RATE = 16000
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def warm_up(self) -> None:
+        warm = getattr(self._inner, "warm_up", None)
+        if warm is not None:
+            warm()
+
+    def transcribe(self, audio):
+        started = time.monotonic()
+        text = self._inner.transcribe(audio)
+        took = time.monotonic() - started
+        seconds = len(audio) / self.SAMPLE_RATE
+        print(f"  [heard {seconds:.1f}s of audio in {took:.2f}s] {text!r}", flush=True)
+        return text
+
+
 class ConsoleIndicator:
     """Stands in for the pill on platforms that have no overlay yet.
 
@@ -481,7 +512,7 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     controller = DictationController(
         hotkey=spec,
         recorder=recorder,
-        transcriber=transcriber,
+        transcriber=NarratingTranscriber(transcriber),
         paster=paste_mac,
         indicator=indicator,
         min_duration_s=float(cfg["min_duration_s"]),
