@@ -30,6 +30,7 @@ from vocal_advantage.config import CONFIG_PATH, load_config, save_config
 from vocal_advantage.console import say, warn
 from vocal_advantage.controller import DictationController
 from vocal_advantage.dictionary import DICTIONARY_PATH, load_dictionary
+from vocal_advantage.frontmost import frontmost_app, matches
 from vocal_advantage.hotkey_spec import HotkeyError, HotkeySpec, parse_hotkey
 from vocal_advantage.cleanup import ai_clean, clean_speech, warm_up_model
 from vocal_advantage.streaming import StreamingTranscript
@@ -148,9 +149,23 @@ def _cleaner(cfg: dict, dictionary=None):
     else:
         base = clean_speech
 
-    if not dictionary:
+    # Absent (a bare dict in a test) means "no list", not "the defaults" --
+    # which is what keeps `_cleaner({}) is clean_speech` true.
+    skip = tuple(cfg.get("skip_cleanup_in") or ())
+
+    if not dictionary and not skip:
         return base
-    return lambda text: dictionary.apply(base(text))
+
+    def clean(text: str) -> str:
+        # Checked per dictation, not once at startup: the whole point is which
+        # window is about to receive this paste, and that changes constantly.
+        if skip and matches(frontmost_app(), skip):
+            cleaned = text
+        else:
+            cleaned = base(text)
+        return dictionary.apply(cleaned) if dictionary else cleaned
+
+    return clean
 
 
 def _warm_up_ai_cleanup(cfg: dict) -> None:

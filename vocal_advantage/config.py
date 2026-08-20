@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from .console import warn
+from .frontmost import DEFAULT_SKIP_CLEANUP_IN
 from .hotkey_spec import HotkeyError, parse_hotkey
 
 # __file__ is <repo>/vocal_advantage/config.py, so parent.parent is the repo
@@ -61,6 +62,15 @@ DEFAULTS: dict = {
     # message, and anchoring the centre keeps it growing evenly in both
     # directions instead of walking sideways every time one appears.
     "flow_bar_point": None,
+    # Applications where the cleanup pass is left switched off. Filler removal
+    # is right for prose and wrong for a shell -- it will happily turn a
+    # command into something that does not run, and you find out when you press
+    # Enter. Matched as case-insensitive substrings, so one list works on both
+    # machines: "terminal" catches macOS Terminal and Windows Terminal alike.
+    #
+    # The personal dictionary still applies here. Skipping *cleanup* is not the
+    # same as agreeing to spell your own name wrong.
+    "skip_cleanup_in": list(DEFAULT_SKIP_CLEANUP_IN),
 }
 
 #: The positions the Flow Bar understands. "bottom-center" is accepted as an
@@ -121,8 +131,24 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     cfg["flow_bar"] = _checked_flow_bar(cfg["flow_bar"], path)
     cfg["flow_bar_position"] = _checked_position(cfg["flow_bar_position"], path)
     cfg["flow_bar_point"] = _checked_point(cfg["flow_bar_point"], path)
+    cfg["skip_cleanup_in"] = _checked_skip_list(cfg["skip_cleanup_in"], path)
 
     return cfg
+
+
+def _checked_skip_list(value: object, path: Path) -> list:
+    """A list of text, or the default with a warning.
+
+    An empty list is legitimate and means "always clean", so it is passed
+    through rather than treated as missing.
+    """
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return list(value)
+    warn(
+        f"WARNING: {path}: skip_cleanup_in should be a list of text, not "
+        f"{value!r}. Using the defaults for this run."
+    )
+    return list(DEFAULTS["skip_cleanup_in"])
 
 
 def _checked_point(value: object, path: Path) -> list | None:

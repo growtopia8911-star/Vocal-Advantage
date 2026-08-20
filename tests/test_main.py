@@ -1253,3 +1253,61 @@ def test_a_dictionary_that_explodes_never_stops_the_app(tmp_path, capsys):
     assert loaded.apply("kelvin") == "kelvin"
     assert loaded.hotwords == ""
     assert "carrying on without it" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Skipping the cleanup pass in terminals and code editors
+# --------------------------------------------------------------------------
+
+
+def test_cleanup_is_skipped_in_a_listed_app():
+    # Filler removal is right for prose and wrong for a shell: it will happily
+    # turn a command into something that does not run.
+    cfg = {"clean_speech": True, "skip_cleanup_in": ["terminal"]}
+    clean = va_main._cleaner(cfg)
+    with mock.patch.object(va_main, "frontmost_app", lambda: "Terminal"):
+        assert clean("Um, git status") == "Um, git status"
+
+
+def test_cleanup_still_runs_everywhere_else():
+    cfg = {"clean_speech": True, "skip_cleanup_in": ["terminal"]}
+    clean = va_main._cleaner(cfg)
+    with mock.patch.object(va_main, "frontmost_app", lambda: "Notes"):
+        assert clean("Um, hello") != "Um, hello"
+
+
+def test_the_dictionary_still_applies_in_a_skipped_app():
+    # Skipping *cleanup* is not the same as agreeing to spell your name wrong.
+    cfg = {"clean_speech": True, "skip_cleanup_in": ["terminal"]}
+    clean = va_main._cleaner(cfg, _Dict({"kelvin": "Kevin"}))
+    with mock.patch.object(va_main, "frontmost_app", lambda: "Terminal"):
+        assert clean("ssh kelvin") == "ssh Kevin"
+
+
+def test_an_unknown_app_gets_the_normal_cleanup():
+    # frontmost_app() returning None means "could not tell". The safe failure
+    # is cleaning where you would rather it had not, never skipping everywhere.
+    cfg = {"clean_speech": True, "skip_cleanup_in": ["terminal"]}
+    clean = va_main._cleaner(cfg)
+    with mock.patch.object(va_main, "frontmost_app", lambda: None):
+        assert clean("Um, hello") != "Um, hello"
+
+
+def test_the_app_is_checked_per_dictation_not_once_at_startup():
+    # The whole point is which window is about to receive this paste, and that
+    # changes constantly. Reading it once would pin the answer to whatever had
+    # focus when the app launched.
+    cfg = {"clean_speech": True, "skip_cleanup_in": ["terminal"]}
+    clean = va_main._cleaner(cfg)
+
+    app = ["Notes"]
+    with mock.patch.object(va_main, "frontmost_app", lambda: app[0]):
+        assert clean("Um, hello") != "Um, hello"
+        app[0] = "Terminal"
+        assert clean("Um, hello") == "Um, hello"
+
+
+def test_no_skip_list_leaves_the_cleaner_untouched():
+    # Preserves the original contract: with nothing to wrap, _cleaner returns
+    # the cleanup function itself rather than a closure around it.
+    assert va_main._cleaner({"skip_cleanup_in": []}) is va_cleanup.clean_speech

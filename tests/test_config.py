@@ -61,6 +61,7 @@ def test_defaults_has_exactly_the_spec_keys():
         "flow_bar",
         "flow_bar_position",
         "flow_bar_point",
+        "skip_cleanup_in",
         "ai_cleanup",
     }
 
@@ -336,3 +337,36 @@ def test_a_bad_point_does_not_stop_the_app_starting(tmp_path):
         '{"hotkey": "right alt", "flow_bar_point": "nope"}', encoding="utf-8"
     )
     assert load_config(path)["hotkey"] == "right alt"
+
+
+# ---------------------------------------------------------------------------
+# skip_cleanup_in: where the cleanup pass is left switched off
+# ---------------------------------------------------------------------------
+
+
+def test_the_skip_list_ships_with_sensible_defaults(tmp_path):
+    cfg = load_config(tmp_path / "config.json")
+    assert "terminal" in cfg["skip_cleanup_in"]
+    assert "code" in cfg["skip_cleanup_in"]
+
+
+def test_the_skip_list_can_be_replaced(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"skip_cleanup_in": ["my-editor"]}', encoding="utf-8")
+    assert load_config(path)["skip_cleanup_in"] == ["my-editor"]
+
+
+def test_an_empty_skip_list_is_honoured_not_treated_as_missing(tmp_path):
+    # "Always clean, everywhere" is a legitimate thing to ask for, and
+    # substituting the defaults here would silently ignore it.
+    path = tmp_path / "config.json"
+    path.write_text('{"skip_cleanup_in": []}', encoding="utf-8")
+    assert load_config(path)["skip_cleanup_in"] == []
+
+
+@pytest.mark.parametrize("bad", ['"terminal"', "[1, 2]", "42", "null"])
+def test_a_bad_skip_list_warns_and_falls_back(tmp_path, capsys, bad):
+    path = tmp_path / "config.json"
+    path.write_text(f'{{"skip_cleanup_in": {bad}}}', encoding="utf-8")
+    assert "terminal" in load_config(path)["skip_cleanup_in"]
+    assert capsys.readouterr().err != ""
