@@ -125,6 +125,7 @@ shared through git — it is your machine's settings.
 | `device` | `"auto"` | Graphics card if there is one, otherwise CPU. |
 | `min_duration_s` | `0.4` | Anything shorter than this is thrown away. |
 | `max_duration_s` | `300` | Force-stops a recording you forgot about, after 5 minutes. |
+| `clean_speech` | `true` | Drops "um", "uh" and stutters before anything is typed. Set `false` for the raw transcript. |
 
 ### Choosing a model
 

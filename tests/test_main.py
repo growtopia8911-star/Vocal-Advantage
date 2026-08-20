@@ -692,7 +692,7 @@ class _ScriptedTranscriber:
         return self.answers.pop(0) if self.answers else ""
 
 
-def _live(answers, pass_time=0.0):
+def _live(answers, pass_time=0.0, **kwargs):
     rec = _FakeRec()
     clk = _LiveClock()
     tr = _ScriptedTranscriber(answers, clock=clk, pass_time=pass_time)
@@ -703,6 +703,7 @@ def _live(answers, pass_time=0.0):
         type_partial=lambda t: typed.append(t) or True,
         type_final=lambda t: final.append(t) or True,
         clock=clk,
+        **kwargs,
     )
     return live, rec, tr, typed, final, clk
 
@@ -851,3 +852,81 @@ def test_pacing_resets_between_dictations():
     rec.say(2.0)
     live.on_partial()          # a fresh dictation must not inherit that debt
     assert tr.calls == 2
+
+
+
+# -- filler cleanup ---------------------------------------------------------
+#
+# Cleaning must happen before StreamingTranscript sees the text, so a filler is
+# never typed and then removed -- removing it would mean backspacing over words
+# the user is watching. See docs/plans/2026-08-20-speech-cleanup.md.
+
+
+def test_a_filler_word_never_reaches_the_document():
+    live, rec, tr, typed, _, clk = _live(["Um, so I think", "Um, so I think"])
+    rec.say(2.0)
+    live.on_partial()
+    clk.advance(1.0)
+    live.on_partial()
+    assert typed == ["So I think"], typed
+    assert "Um" not in " ".join(typed)
+
+
+def test_the_final_transcript_is_cleaned_too():
+    live, rec, tr, typed, final, clk = _live(["Um, so I think", "Um, so I think"])
+    rec.say(2.0)
+    live.on_partial()
+    clk.advance(1.0)
+    live.on_partial()
+    assert live.paste_text("Um, so I think we should uh ship it") is True
+    assert final == [" we should ship it"], final
+
+
+def test_cleaning_can_be_switched_off():
+    """config.json clean_speech=false must give the raw transcript back."""
+    live, rec, tr, typed, _, clk = _live(
+        ["Um, so I think", "Um, so I think"], clean=lambda text: text
+    )
+    rec.say(2.0)
+    live.on_partial()
+    clk.advance(1.0)
+    live.on_partial()
+    assert typed == ["Um, so I think"], typed
+
+
+class _RecordingPaster:
+    def __init__(self, ok=True):
+        self.pasted = []
+        self.ok = ok
+
+    def paste_text(self, text):
+        self.pasted.append(text)
+        return self.ok
+
+
+def test_the_windows_path_cleans_before_pasting():
+    """Windows has no live preview, so cleaning has to happen at the paster."""
+    inner = _RecordingPaster()
+    paster = va_main.CleaningPaster(inner)
+    assert paster.paste_text("Um, so I I think we should uh ship it") is True
+    assert inner.pasted == ["So I think we should ship it"]
+
+
+def test_an_utterance_that_was_only_filler_pastes_nothing():
+    """Nothing to type is a success, not a failure to report to the user."""
+    inner = _RecordingPaster()
+    paster = va_main.CleaningPaster(inner)
+    assert paster.paste_text("um uh er") is True
+    assert inner.pasted == []
+
+
+def test_a_paste_failure_is_still_reported_through_the_wrapper():
+    inner = _RecordingPaster(ok=False)
+    assert va_main.CleaningPaster(inner).paste_text("hello there") is False
+
+
+def test_the_wrapper_can_be_switched_off():
+    inner = _RecordingPaster()
+    paster = va_main.CleaningPaster(inner, clean=lambda text: text)
+    paster.paste_text("Um, hello")
+    assert inner.pasted == ["Um, hello"]

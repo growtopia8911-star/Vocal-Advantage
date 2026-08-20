@@ -27,6 +27,7 @@ from vocal_advantage import cuda_dlls
 from vocal_advantage.config import CONFIG_PATH, load_config, save_config
 from vocal_advantage.controller import DictationController
 from vocal_advantage.hotkey_spec import HotkeyError, HotkeySpec, parse_hotkey
+from vocal_advantage.cleanup import clean_speech
 from vocal_advantage.streaming import StreamingTranscript
 
 VERSION = "0.1.0"
@@ -121,6 +122,35 @@ class NarratingTranscriber:
         return text
 
 
+def _cleaner(cfg: dict):
+    """clean_speech from config, as the callable both platforms take."""
+    if cfg.get("clean_speech", True):
+        return clean_speech
+    return lambda text: text
+
+
+class CleaningPaster:
+    """Wraps a paster so filler words never reach the document.
+
+    The Windows path has no live preview -- the whole transcript arrives at
+    once on key release -- so there is no LiveDictation to clean inside and the
+    cleaning belongs here instead. Same rule either way: clean before the text
+    is typed, never after.
+    """
+
+    def __init__(self, paster, clean=clean_speech) -> None:
+        self._paster = paster
+        self._clean = clean
+
+    def paste_text(self, text: str) -> bool:
+        cleaned = self._clean(text)
+        if not cleaned:
+            # The user said nothing but "um". Reporting failure would flash an
+            # error at a dictation that worked exactly as asked.
+            return True
+        return bool(self._paster.paste_text(cleaned))
+
+
 class LiveDictation:
     """Types words as they settle, while the user is still speaking.
 
@@ -151,9 +181,13 @@ class LiveDictation:
 
     def __init__(
         self, *, recorder, transcriber, type_partial, type_final,
-        clock=time.monotonic,
+        clock=time.monotonic, clean=clean_speech,
     ) -> None:
         self._recorder = recorder
+        # Applied before the agreement logic, never after: a filler that
+        # reached the document could only be removed by backspacing over words
+        # the user is watching. Identity when config says clean_speech=false.
+        self._clean = clean
         self._transcriber = transcriber
         self._type_partial = type_partial
         self._type_final = type_final
@@ -183,7 +217,7 @@ class LiveDictation:
         if audio.size > int(self.MAX_PARTIAL_S * self.SAMPLE_RATE):
             return
         started = self._clock()
-        text = self._transcriber.transcribe(audio)
+        text = self._clean(self._transcriber.transcribe(audio))
         took = self._clock() - started
         self._next_pass_at = self._clock() + max(took, self.MIN_GAP_S)
         fresh = self._session.commit(text)
@@ -197,7 +231,7 @@ class LiveDictation:
 
     def paste_text(self, text: str) -> bool:
         """The controller's final delivery: type whatever is still owed."""
-        remaining = self._session.finish(text)
+        remaining = self._session.finish(self._clean(text))
         self._session.reset()
         self._last_samples = 0
         self._next_pass_at = 0.0
@@ -466,7 +500,7 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
         transcriber=transcriber,
         # The paste_win module itself satisfies the paster protocol: it exposes a
         # module-level paste_text(str) -> bool, which is the whole interface.
-        paster=paste_win,
+        paster=CleaningPaster(paste_win, clean=_cleaner(cfg)),
         indicator=indicator,
         min_duration_s=float(cfg["min_duration_s"]),
         max_duration_s=float(cfg["max_duration_s"]),
@@ -620,6 +654,7 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         transcriber=transcriber,
         type_partial=paste_mac.type_partial,
         type_final=paste_mac.paste_text,
+        clean=_cleaner(cfg),
     )
     controller = DictationController(
         hotkey=spec,

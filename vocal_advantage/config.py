@@ -36,6 +36,11 @@ DEFAULTS: dict = {
     "device": "auto",
     "min_duration_s": 0.4,
     "max_duration_s": 300,
+    # Filler words and stutters are dropped before anything is typed. Set
+    # false for the raw transcript. Not in the original spec: added once a
+    # real dictation came back as "Um, so I think we should ship it on
+    # Friday." -- Whisper punctuates well but keeps every "um".
+    "clean_speech": True,
 }
 
 
