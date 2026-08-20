@@ -75,11 +75,15 @@ NSApplicationActivationPolicyAccessory = 1
 NSTextAlignmentCenter = 2
 
 # --- palette ----------------------------------------------------------------
-#: The pill is an outline, not a solid: the fill is gone entirely so the desktop
-#: shows through, and only the edge is drawn. `Frame.pill_alpha` is therefore the
-#: opacity of that outline -- the state change reads as the edge firming up
-#: rather than the body brightening.
+#: A light ground inside a black outline, with black bars on it -- the reference
+#: look. A fill-less pill was tried first and is the more elegant idea, but on a
+#: real desktop a 1.5px black outline over arbitrary wallpaper is genuinely hard
+#: to find, and a bar you cannot see is not a quieter design, it is a broken one.
+#: Warm rather than pure white, so it reads as paper rather than a blown-out box.
+PILL_FILL_RGB = (0.97, 0.965, 0.945)
+#: Outline and bars share one colour, so the pill reads as a single drawn object.
 PILL_RGB = (0.0, 0.0, 0.0)
+BAR_RGB = (0.0, 0.0, 0.0)
 PILL_STROKE_WIDTH = 1.5
 
 FPS = 60
@@ -152,19 +156,26 @@ class _FlowBarView(NSView):
         inset = PILL_STROKE_WIDTH / 2.0
         radius = (height - PILL_STROKE_WIDTH) / 2.0   # still fully rounded ends
 
-        red, green, blue = PILL_RGB
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(
-            red, green, blue, data.pill_alpha
-        ).set()
-        outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             NSMakeRect(
                 inset, inset,
                 width - PILL_STROKE_WIDTH, height - PILL_STROKE_WIDTH,
             ),
             radius, radius,
         )
-        outline.setLineWidth_(PILL_STROKE_WIDTH)
-        outline.stroke()
+
+        fill_red, fill_green, fill_blue = PILL_FILL_RGB
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(
+            fill_red, fill_green, fill_blue, data.pill_alpha
+        ).set()
+        pill.fill()
+
+        red, green, blue = PILL_RGB
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(
+            red, green, blue, data.pill_alpha
+        ).set()
+        pill.setLineWidth_(PILL_STROKE_WIDTH)
+        pill.stroke()
 
         if data.bar_alpha > 0.01:
             self._draw_bars(data, width, height)
@@ -176,7 +187,10 @@ class _FlowBarView(NSView):
         max_half = height / 2.0 - wf.BAR_MARGIN_Y
         xs = wf.bar_layout(width, len(data.heights))
 
-        NSColor.colorWithCalibratedWhite_alpha_(1.0, data.bar_alpha).set()
+        bar_red, bar_green, bar_blue = BAR_RGB
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(
+            bar_red, bar_green, bar_blue, data.bar_alpha
+        ).set()
         for x, normalised in zip(xs, data.heights):
             # Mirrored about the centre line: each bar grows up and down by the
             # same amount. A bar chart would run from the bottom edge instead,
@@ -199,7 +213,7 @@ class _FlowBarView(NSView):
         attributes = {
             NSFontAttributeName: NSFont.systemFontOfSize_(MESSAGE_FONT_SIZE),
             NSForegroundColorAttributeName:
-                NSColor.colorWithCalibratedWhite_alpha_(0.96, data.text_alpha),
+                NSColor.colorWithCalibratedWhite_alpha_(0.08, data.text_alpha),
             NSParagraphStyleAttributeName: style,
         }
         text = NSString.stringWithString_(data.text)

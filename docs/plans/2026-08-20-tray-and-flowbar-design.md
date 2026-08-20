@@ -165,27 +165,20 @@ hazard and becomes `say(traceback.format_exc(), error=True)`.
 
 ### `waveform.py` — the tested part
 
-Every function pure, deterministic, no numpy-in-the-signature where avoidable:
+Every function pure and deterministic:
 
 | Function | Does |
 | --- | --- |
-| `block_rms(block)` | float32 block → RMS |
+| `block_rms(block)` | float32 block → RMS. Guards nan: one reaching the easing poisons every bar forever, because nan never converges back out. |
 | `level_from_rms(rms)` | dB-mapped to 0..1 over −60..−15 dBFS, clamped |
-| `Envelope.update(level)` | fast attack (α 0.5), slow release (α 0.08) |
-| `centre_weights(n)` | symmetric hump, `EDGE` at the ends, 1.0 at centre |
-| `bar_targets(level, n, tick)` | weights × level, plus deterministic per-bar wobble |
-| `ease_bars(current, targets, α)` | one easing step toward the targets |
-| `idle_heights(n)` | flat row of short dashes |
-| `transcribing_heights(n, tick)` | a travelling bump — deterministic in `tick` |
-| `bar_layout(width, n, bar_w, gap)` | x-centres |
+| `ScrollingWave.update(level)` | one frame of the travelling trace |
+| `ease_bars(current, targets, α)` | one easing step; raises on a length mismatch rather than letting `zip` silently drop bars |
+| `idle_heights(n)` | the resting row |
+| `transcribing_heights(n, tick)` | the travelling bump — deterministic in `tick` |
+| `bar_layout(width, n, …)` | x-centres |
 
-The wobble is what makes it read as a soundwave rather than an arch: a fixed
-per-bar phase driven by `tick`, amplitude scaled by `level`, so it is still at
-silence. Deterministic in `(i, tick)` and therefore testable.
-
-**Motion:** at 60fps, easing α 0.25 gives a ~66ms time constant — responsive but
-gliding. Nothing is ever assigned to a bar height directly; every visible change
-goes through `ease_bars`.
+**Motion:** at 60fps, easing α 0.25 is a ~66ms time constant. Nothing is ever
+assigned to a bar height directly; every visible change goes through `ease_bars`.
 
 ### `flowbar.py` — the state machine
 
@@ -210,20 +203,81 @@ keeps `"nothing heard"` and `"could not paste - press Ctrl+V"` visible; the
 three-state spec has nowhere else to put them, and losing the Ctrl+V instruction
 would mean losing a recoverable dictation silently.
 
+### The waveform: a scrolling history
+
+**Changed mid-build, 2026-08-20, and it replaced the original design.** The
+first version was a row of meters: every bar showed the *current* level at once,
+shaped by a centre-weighting profile and a synthetic per-bar wobble so it looked
+like a voice rather than an arch.
+
+It now shows a scrolling history instead. New audio enters at the **left** edge,
+every bar shifts one place right, the oldest drops off. A bar's height is the
+level at the moment it captured, fixed forever after; it only moves.
+
+`ScrollingWave` keeps two arrays that shift **together**: `_targets` (what each
+bar captured) and `_heights` (what is drawn, easing toward it). Because both
+shift, the eased value travels *with* its bar — one entering at the left starts
+at zero and glides up, so nothing pops in at full height. Easing per fixed
+screen position instead would drag each bar toward its neighbour's value every
+frame and smear the trace into mush.
+
+The centre-weighting, the wobble and the `Envelope` were all **deleted**. They
+existed to fake the shape of a voice when every bar showed the same instant, and
+a real history supplies that for free.
+
+| Decision | Why |
+| --- | --- |
+| Shift every 6 frames, not every frame | One shift per frame at 60fps scrolls the whole pill in 0.25s. The brief said "the last second or two", and that half governs: 15 bars × 6 ÷ 60 = **1.5s**. |
+| Peak-hold between shifts | A 6-frame gap spans ~1.5 audio blocks; sampling on the boundary drops short consonants entirely. |
+| Wave fed in *every* state, silence when not recording | This is what makes release look right — the trace drifts off instead of blanking. |
+| Transcribing takes `max(trace, sweep)` | A hard switch would be the instant reset the scrolling exists to avoid. The draining trace shows through for the first second; the sweep takes over as it empties. |
+
+The newest bar never quite finishes easing before it shifts along — 6 frames is
+not enough at `EASE_ALPHA`. It arrives one position in. Left deliberately, and
+pinned with a test, because it makes the leading edge look alive rather than
+stamped.
+
 ### Look
 
-150×48 pill, radius 24 (half the height — fully rounded ends). 13 bars (odd, so
-there is a true centre), 4px wide, 5px gaps → 112px of content, 19px margins.
-Bars are `create_line`-style round-capped strokes mirrored about the centre
-line: each is drawn from `cy − h` to `cy + h`, never from a baseline.
+**Revised repeatedly against the running preview, which is why the preview was
+built first.** The design started at a 150×48 solid near-black pill with white
+bars. Four rounds of looking at it on a real desktop took it to:
 
-| | Pill fill | Bars |
+**78×30**, radius 15 (half the height — fully rounded ends). 15 bars, 1.5px
+wide, 2.2px gaps → 53px of content, 12px side margins. Those margins are
+load-bearing: the ends are fully round, so a bar much closer to the edge sits
+under the curve of the cap and clips against it.
+
+A **light cream ground inside a 1.5px black outline, with black bars** — the
+reference look. A fill-less pill was tried and is the more elegant idea, but on a
+real desktop a thin black outline over arbitrary wallpaper is genuinely hard to
+find, and a bar you cannot see is not a quieter design, it is a broken one.
+
+| | Whole pill | Bars |
 | --- | --- | --- |
-| Idle | `#0E0E10` @ 88% | white @ 55%, half-height 2px, static |
-| Recording | `#0E0E10` @ 95% | white @ 100%, half-height up to 16px |
-| Transcribing | `#0E0E10` @ 92% | white @ 85%, travelling bump |
+| Idle | 82% | 55%, ~7px tall, still |
+| Recording | 96% | 100%, up to 23px |
+| Transcribing | 90% | 85%, travelling bump |
 
----
+**Two bugs that only looking caught**, both of which shipped-looking-fine:
+
+Shrinking the pill turned the resting bars into dots — a round-capped bar drawn
+no taller than it is wide *is* a circle, and the idle height was a fraction of a
+half-height that changed underneath it. `test_idle_bars_are_lines_not_dots` now
+asserts drawn height against bar width rather than a taste bound.
+
+`setFloatingPanel_(True)` **assigns `NSFloatingWindowLevel` itself**, silently
+undoing the `setLevel_(NSStatusWindowLevel)` above it. The pill sat at level 3
+for an hour. Found only by reading `.level()` back, never by looking.
+
+### Drawing symmetry, on all three surfaces
+
+Pillow and AppKit both round the two ends of a shape independently, so a bar
+straddling the centre of an even-height image comes out a row taller on one
+side. One row is invisible in a screenshot and unmistakable once it animates.
+`tray_icon` and `flowbar_win` therefore both draw, then **copy the top half over
+the bottom**, forcing the mirroring the design asks for rather than hoping for
+it.
 
 ## `config.json`
 
@@ -289,6 +343,19 @@ icon, the layered window. Those are the hand-check list.
 
 `pillow` on both platforms (the icon is generated, not shipped). `pystray`
 marked `sys_platform == 'win32'`. Nothing new on macOS.
+
+## Known gaps
+
+**Nothing appears for the first 10-30 seconds after launch.** The tray icon and
+the Flow Bar are created *after* the model loads, so a no-console launch shows
+no sign of life until it is ready. Deliberate for now — building the UI first
+would mean a visible app with no working dictation behind it, and it would make
+`test_run_app_on_mac_never_touches_tkinter` create a real status item. The fix,
+if it grates, is a tray icon up front showing "Loading model".
+
+**The pill is a fixed light cream.** It reads well on a light desktop and as a
+bright slab on a dark one. macOS can report the current appearance; nothing
+does yet.
 
 ## Out of scope
 

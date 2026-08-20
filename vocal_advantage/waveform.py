@@ -5,22 +5,26 @@ Both renderers -- the macOS `NSPanel` and the Windows layered window -- share
 this file, so the pill moves identically on the two machines and the part that
 is easy to get subtly wrong is the part that is tested.
 
+**The bars are a scrolling history, not a row of meters.** New audio enters at
+the left-hand edge; every bar then shifts one place right and the oldest drops
+off. What you see is the last second and a half of your voice travelling across
+the pill, like a seismograph trace. A bar's height is simply the level at the
+moment it was captured -- once captured it never changes again, it only moves.
+
 **Heights are normalised**: 0.0 is a flat line and 1.0 is the tallest a bar may
 draw. Each renderer multiplies by its own half-height, because the bars mirror
 about the pill's centre line -- every bar grows *both* up and down by the same
-amount. That is the detail that makes it read as a soundwave rather than a bar
-chart standing on a baseline, and it is why nothing here returns a y position.
+amount. That is what makes it read as a soundwave rather than a bar chart
+standing on a baseline, and it is why nothing here returns a y position.
 
 The chain, once per frame:
 
-    recorder.level  ->  level_from_rms  ->  Envelope.update
-                    ->  bar_targets     ->  ease_bars  ->  pixels
+    recorder.level  ->  level_from_rms  ->  ScrollingWave.update  ->  pixels
 
-Two separate smoothings, on purpose, because they fix different problems. The
-`Envelope` smooths the *audio*: it has a fast attack so the start of a syllable
-is not missed and a slow release so the gaps between words do not make the pill
-flicker. `ease_bars` smooths the *drawing*: no bar height is ever assigned
-directly, so every visible change is a glide rather than a step.
+There is no centre-weighting and no synthetic wobble any more. Both existed to
+fake the shape of a voice back when every bar showed the same instant; a real
+history of real levels supplies that shape for free, and simulating it on top
+would only fight it.
 """
 
 from __future__ import annotations
@@ -31,57 +35,49 @@ import numpy as np
 
 # --- the pill ---------------------------------------------------------------
 # Shared by both renderers so the two machines cannot drift apart.
-PILL_WIDTH = 84
-PILL_HEIGHT = 24
+PILL_WIDTH = 78
+PILL_HEIGHT = 30
 #: Half the height, so the ends are fully round -- a lozenge, not a rounded box.
 PILL_RADIUS = PILL_HEIGHT / 2
 
-#: Odd, so there is a true centre bar for the weighting below to peak on.
-BAR_COUNT = 9
-BAR_WIDTH = 2
-BAR_GAP = 4
-#: Clearance between the tallest bar and the pill's edge. 9 bars of 2px with
-#: 4px gaps is 50px of content, which leaves 17px margins inside an 84px pill.
-BAR_MARGIN_Y = 3
+BAR_COUNT = 15
+BAR_WIDTH = 1.5
+BAR_GAP = 2.2
+#: Clearance between the tallest bar and the pill's edge. 15 bars of 1.5px with
+#: 2.2px gaps is 53px of content, which leaves 12px margins inside a 78px pill.
+#: Those margins are load-bearing, not slack: the ends are fully round, so a bar
+#: pushed much closer to the edge sits under the curve of the cap and clips
+#: against it when the level is high.
+BAR_MARGIN_Y = 3.5
 #: Pixels above the bottom of the screen (macOS Dock, Windows taskbar).
 SCREEN_MARGIN = 64
 
 # --- level mapping ----------------------------------------------------------
 #: Ordinary speech sits near -30 dBFS. On a linear scale that is rms 0.03, which
-#: would move a 16px bar by half a pixel -- the pill would look broken while you
+#: would move an 11px bar by half a pixel -- the pill would look broken while you
 #: were talking normally into it. Hence dB, and hence a ceiling well below 0.
 FLOOR_DB = -60.0
 CEIL_DB = -15.0
 
 # --- motion -----------------------------------------------------------------
-# Tuned for a 60fps render loop. All three are the feel of the thing; they are
-# the first place to reach when it looks wrong.
-#: Per-frame easing coefficient. 0.25 is a ~66ms time constant: rest to full
-#: scale takes 9 frames, which reads as a glide. Raise it toward 1.0 and the
-#: bars snap; drop it toward 0.05 and they wallow.
+#: Per-frame easing coefficient, for a 60fps render loop. 0.25 is a ~66ms time
+#: constant: a bar entering at the left reaches full height in 9 frames, which
+#: reads as a glide. Raise it toward 1.0 and new bars pop in at full height;
+#: drop it toward 0.05 and the trace arrives blurred.
 EASE_ALPHA = 0.25
-#: Fast attack, slow release -- see the module docstring.
-ATTACK_ALPHA = 0.5
-RELEASE_ALPHA = 0.08
 
-#: How much shorter than the centre bar the end bars are at the same level.
-#: Not decoration: a flat profile reads as a row of independent meters rather
-#: than one wave.
-EDGE_WEIGHT = 0.45
+#: Frames between shifts, and the one number that sets how much history the pill
+#: holds: BAR_COUNT * SCROLL_FRAMES / fps seconds, so 15 * 6 / 60 = 1.5s.
+#:
+#: Deliberately NOT one shift per rendered frame. At 60fps that scrolls the
+#: whole pill in a quarter of a second, which is a blur rather than a trace --
+#: "the last second or two" is the half of the brief that governs here.
+SCROLL_FRAMES = 6
 
-#: A small per-bar ripple, so the row is never a perfect arch. Amplitude scales
-#: with level, so silence is genuinely still. Subtractive (see `bar_targets`),
-#: which keeps the weighted target as the ceiling and means loud speech never
-#: clips against the top of the pill.
-WOBBLE = 0.22
-WOBBLE_SPEED = 0.11     # radians per frame
-WOBBLE_PHASE = 1.7      # radians between neighbouring bars
-
-#: Resting height, as a fraction of the 9px half-height: ~6px of visible line.
+#: Resting height, as a fraction of the 11.5px half-height: ~7px of visible line.
 #: This has a hard floor, not just a taste range. A round-capped bar whose drawn
 #: height falls to its own width is a circle, and the resting row reads as a row
-#: of dots rather than the short lines the design asks for. Anything below about
-#: 0.23 here crosses that line at the current geometry.
+#: of dots rather than the short lines the design asks for.
 IDLE_HEIGHT = 0.32
 
 # --- the transcribing sweep -------------------------------------------------
@@ -89,9 +85,7 @@ IDLE_HEIGHT = 0.32
 #: be mistaken for "still listening".
 SWEEP_AMPLITUDE = 0.42
 #: One pass takes ~1.2s at 60fps, which is about how long a transcribe runs --
-#: so you see a whole sweep, not an arbitrary slice of one. Slower than this and
-#: the bump spends most of a short transcribe still off the end of the pill,
-#: which is indistinguishable from nothing happening.
+#: so you see a whole sweep, not an arbitrary slice of one.
 SWEEP_SPEED = 0.24      # bars per frame
 SWEEP_WIDTH = 2.2       # bars, the gaussian's sigma
 SWEEP_PAD = 2           # bars of run-off past each end, so it enters and leaves
@@ -105,7 +99,7 @@ def block_rms(block: np.ndarray) -> float:
     """RMS of one block of float32 samples. Never raises, never returns nan.
 
     The nan guard is not theoretical: a stream whose device was unplugged
-    mid-block can deliver them, and a single nan reaching `ease_bars` would
+    mid-block can deliver them, and a single nan reaching the easing would
     propagate into every bar height and stay there for the life of the process,
     because nan never converges back out of an exponential ease.
     """
@@ -129,80 +123,6 @@ def level_from_rms(
     return _clamp((decibels - floor_db) / (ceil_db - floor_db))
 
 
-class Envelope:
-    """Smooths the audio level: quick to rise, slow to fall.
-
-    Deliberately not a plain rolling average. A symmetric filter either misses
-    the attack of a syllable (too slow) or flickers in the gaps between words
-    (too fast); there is no setting that does both. Asymmetric coefficients do.
-    """
-
-    def __init__(
-        self, attack: float = ATTACK_ALPHA, release: float = RELEASE_ALPHA
-    ) -> None:
-        self._attack = attack
-        self._release = release
-        self._value = 0.0
-
-    @property
-    def value(self) -> float:
-        return self._value
-
-    def update(self, level: float) -> float:
-        if not math.isfinite(level):
-            level = 0.0
-        alpha = self._attack if level > self._value else self._release
-        self._value += (level - self._value) * alpha
-        return self._value
-
-
-def centre_weights(n: int, edge: float = EDGE_WEIGHT) -> tuple[float, ...]:
-    """A symmetric hump: 1.0 at the centre bar, `edge` at the two ends.
-
-    A quarter-cosine rather than a triangle, so the falloff has no corner in it
-    at the centre -- a corner is visible as a kink in the row when the level is
-    high.
-    """
-    if n <= 1:
-        return (1.0,)
-    centre = (n - 1) / 2.0
-    return tuple(
-        edge + (1.0 - edge) * math.cos(math.pi / 2 * abs(i - centre) / centre)
-        for i in range(n)
-    )
-
-
-def bar_targets(
-    level: float,
-    n: int,
-    tick: int,
-    *,
-    wobble: float = WOBBLE,
-    edge: float = EDGE_WEIGHT,
-) -> tuple[float, ...]:
-    """Where each bar wants to be, for one audio level at one frame.
-
-    Targets only -- `ease_bars` is what actually moves anything.
-
-    At `level` 0 this returns exactly `idle_heights(n)`, whatever the tick, so
-    the pauses between sentences are genuinely still and recording-at-silence
-    looks identical to idle. That is what stops the pill twitching at you while
-    you think of the next word.
-    """
-    level = _clamp(level)
-    weights = centre_weights(n, edge)
-    heights = []
-    for i, weight in enumerate(weights):
-        # Subtractive, spanning [1 - wobble, 1.0]: the weighted height stays the
-        # ceiling, so a shout never clips flat against the top of the pill.
-        ripple = 1.0 - wobble * (
-            0.5 + 0.5 * math.sin(tick * WOBBLE_SPEED + i * WOBBLE_PHASE)
-        )
-        height = IDLE_HEIGHT + (1.0 - IDLE_HEIGHT) * level * weight * ripple
-        heights.append(_clamp(height, IDLE_HEIGHT, 1.0))
-    return tuple(heights)
-
-
 def ease_bars(
     current: tuple[float, ...], targets: tuple[float, ...], alpha: float
 ) -> tuple[float, ...]:
@@ -217,6 +137,73 @@ def ease_bars(
             f"cannot ease {len(current)} bars toward {len(targets)} targets"
         )
     return tuple(c + (t - c) * alpha for c, t in zip(current, targets))
+
+
+class ScrollingWave:
+    """A fixed-length history of levels travelling rightward across the pill.
+
+    Two arrays that shift together, which is the whole design:
+
+    * ``_targets`` -- the level each bar captured. Fixed at capture: a bar's
+      height is a fact about a past moment, and nothing later may revise it.
+    * ``_heights`` -- what is actually drawn, easing toward its own target.
+
+    Because both shift, the eased value travels *with* its bar. One entering at
+    the left starts at zero and glides up to what it captured, so nothing pops
+    in at full height, while every older bar has already arrived and simply
+    moves. Easing per fixed screen position instead would pull each bar's value
+    toward its neighbour's every frame and smear the trace into mush.
+
+    Between shifts the incoming level is peak-held rather than sampled. At 60fps
+    a six-frame gap spans only about one and a half audio blocks, so taking
+    whichever frame happened to land on the boundary would drop the loudest part
+    of a short consonant entirely.
+    """
+
+    def __init__(
+        self,
+        n: int = BAR_COUNT,
+        scroll_frames: int = SCROLL_FRAMES,
+        ease: float = EASE_ALPHA,
+        floor: float = IDLE_HEIGHT,
+    ) -> None:
+        self._n = n
+        self._scroll_frames = max(1, int(scroll_frames))
+        self._ease = ease
+        self._floor = floor
+        self._targets = (0.0,) * n
+        self._heights = (0.0,) * n
+        self._frames = 0
+        self._pending = 0.0
+
+    def update(self, level: float) -> tuple[float, ...]:
+        """Advance one rendered frame. Returns heights to draw, left to right.
+
+        Index 0 is the newest audio and the last index is the oldest, because
+        the trace enters on the left and ages toward the right.
+        """
+        if not math.isfinite(level):
+            level = 0.0
+        level = _clamp(level)
+
+        self._pending = max(self._pending, level)
+        self._frames += 1
+        if self._frames >= self._scroll_frames:
+            self._frames = 0
+            self._shift(self._pending)
+            self._pending = 0.0
+
+        self._heights = ease_bars(self._heights, self._targets, self._ease)
+        # Floored at output rather than in the stored heights: the resting row
+        # of dashes is a drawing decision, and baking it into the history would
+        # make silence indistinguishable from a genuinely quiet syllable, and
+        # would stop the wave ever draining fully back to rest.
+        return tuple(max(self._floor, height) for height in self._heights)
+
+    def _shift(self, level: float) -> None:
+        """Admit a new bar at the left; drop the oldest off the right."""
+        self._targets = (level,) + self._targets[:-1]
+        self._heights = (0.0,) + self._heights[:-1]
 
 
 def idle_heights(n: int) -> tuple[float, ...]:

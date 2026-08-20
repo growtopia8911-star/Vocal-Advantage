@@ -100,13 +100,13 @@ def test_louder_speech_makes_taller_bars():
     assert heights == sorted(heights)
 
 
-def test_centre_bars_react_more_than_the_edges():
-    indicator = Indicator(level_source=lambda: 0.1)
+def test_new_audio_appears_at_the_left_edge():
+    # Replaces a centre-weighting test. The bars are a history now: what you
+    # just said is on the left, and the right is a second ago.
+    indicator = Indicator(level_source=lambda: 0.08)
     indicator.show_recording()
-    frame = drain(indicator, 300)
-    centre = wf.BAR_COUNT // 2
-    assert frame.heights[centre] > frame.heights[0]
-    assert frame.heights[centre] > frame.heights[-1]
+    frame = drain(indicator, wf.SCROLL_FRAMES + 3)
+    assert frame.heights[0] > frame.heights[-1]
 
 
 def test_a_failing_level_source_does_not_break_the_frame():
@@ -145,15 +145,36 @@ def test_bars_take_several_frames_to_settle():
     assert frames >= 4
 
 
-def test_no_bar_ever_jumps_more_than_a_fraction_of_full_scale():
-    # A single-frame lurch is exactly the failure mode being designed out.
-    indicator = Indicator(level_source=lambda: 0.9)
-    previous = indicator.next_frame().heights
+def test_the_trace_drains_away_instead_of_resetting():
+    # "When I release the hotkey, let the existing wave scroll off to the left
+    # rather than resetting instantly."
+    indicator = Indicator(level_source=lambda: 0.08)
     indicator.show_recording()
-    for _ in range(300):
-        current = indicator.next_frame().heights
-        assert max(abs(c - p) for c, p in zip(current, previous)) < 0.25
-        previous = current
+    drain(indicator, 300)
+
+    indicator.hide()
+    assert max(drain(indicator, 3).heights) > wf.IDLE_HEIGHT + 0.2
+
+
+def test_the_trace_does_eventually_empty():
+    indicator = Indicator(level_source=lambda: 0.08)
+    indicator.show_recording()
+    drain(indicator, 300)
+    indicator.hide()
+    assert drain(indicator, 600).heights == pytest.approx(
+        wf.idle_heights(wf.BAR_COUNT)
+    )
+
+
+def test_transcribing_lets_the_trace_drain_before_the_sweep_takes_over():
+    # A hard switch to the sweep on release would be the instant reset the
+    # scrolling exists to avoid, so the two are combined rather than swapped.
+    indicator = Indicator(level_source=lambda: 0.08)
+    indicator.show_recording()
+    tall = max(drain(indicator, 300).heights)
+
+    indicator.show_processing()
+    assert max(drain(indicator, 3).heights) == pytest.approx(tall, abs=0.2)
 
 
 def test_state_changes_also_glide():

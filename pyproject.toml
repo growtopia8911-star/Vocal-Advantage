@@ -36,6 +36,15 @@ dependencies = [
     # for the paste. 6.9 MB. Not installed on Windows.
     "pyobjc-framework-Quartz; sys_platform == 'darwin'",
     "numpy",
+    # The tray icon and the Windows overlay are both drawn at runtime with
+    # Pillow, which is what keeps image files out of the repository. Needed on
+    # both platforms: macOS uses it for the menu-bar template image.
+    "pillow",
+    # The Windows tray icon only. macOS uses NSStatusItem directly -- pystray's
+    # run() must own the main thread there, which the overlay's NSApplication
+    # already needs, and pystray cannot mark an image as a template so the icon
+    # would not adapt to a light menu bar.
+    "pystray; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

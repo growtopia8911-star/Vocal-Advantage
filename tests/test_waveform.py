@@ -7,6 +7,12 @@ screen -- which is the whole reason the motion can be tested at all.
 Heights are normalised: 0.0 is a flat line, 1.0 is the tallest a bar may draw.
 The renderer scales them to its own half-height, so nothing here knows about
 pixels except `bar_layout`, which is told the width.
+
+The bars are a scrolling history: audio enters at the left, everything shifts
+right, the oldest falls off. Most of what is worth asserting is therefore about
+*movement over time* rather than about a single frame, which is why so many of
+these tests drive `ScrollingWave` for a run of frames and then look at where
+things ended up.
 """
 
 from __future__ import annotations
@@ -76,130 +82,6 @@ def test_level_from_rms_puts_quiet_speech_in_the_visible_range():
     # 16px bar by half a pixel and the pill would look broken.
     quiet_speech = 10 ** (-30 / 20)
     assert 0.3 < wf.level_from_rms(quiet_speech) < 0.8
-
-
-# --- Envelope ---------------------------------------------------------------
-
-def test_envelope_starts_at_zero():
-    assert wf.Envelope().value == 0.0
-
-
-def test_envelope_rises_faster_than_it_falls():
-    # Fast attack, slow release. This is what stops the bars flickering on the
-    # gaps between words while still catching the start of a syllable.
-    rising = wf.Envelope()
-    rising.update(1.0)
-
-    falling = wf.Envelope()
-    falling._value = 1.0
-    falling.update(0.0)
-
-    assert rising.value > (1.0 - falling.value)
-
-
-def test_envelope_never_overshoots_its_target():
-    env = wf.Envelope()
-    for _ in range(200):
-        env.update(1.0)
-        assert env.value <= 1.0
-
-
-def test_envelope_converges_on_a_held_level():
-    env = wf.Envelope()
-    for _ in range(500):
-        env.update(0.42)
-    assert env.value == pytest.approx(0.42, abs=1e-3)
-
-
-def test_envelope_recovers_from_a_nan_level():
-    # Belt and braces with block_rms's nan guard: one nan that got through
-    # would otherwise stick to the envelope for the life of the process.
-    env = wf.Envelope()
-    env.update(float("nan"))
-    env.update(0.5)
-    assert not math.isnan(env.value)
-
-
-# --- centre_weights ---------------------------------------------------------
-
-def test_centre_weights_are_symmetric():
-    weights = wf.centre_weights(13)
-    assert weights == tuple(reversed(weights))
-
-
-def test_centre_weights_peak_at_the_centre():
-    weights = wf.centre_weights(13)
-    assert weights[6] == pytest.approx(1.0)
-    assert max(weights) == pytest.approx(1.0)
-
-
-def test_centre_weights_reach_edge_value_at_the_ends():
-    weights = wf.centre_weights(13, edge=0.45)
-    assert weights[0] == pytest.approx(0.45)
-    assert weights[-1] == pytest.approx(0.45)
-
-
-def test_centre_weights_decrease_outward_from_the_centre():
-    # "Bars nearer the centre should react a touch more than those at the
-    # edges." A flat profile would read as a row of independent meters.
-    weights = wf.centre_weights(13)
-    left_half = weights[:7]
-    assert list(left_half) == sorted(left_half)
-
-
-def test_centre_weights_handles_a_single_bar():
-    assert wf.centre_weights(1) == (1.0,)
-
-
-def test_centre_weights_handles_an_even_count():
-    weights = wf.centre_weights(12)
-    assert len(weights) == 12
-    assert weights == tuple(reversed(weights))
-
-
-# --- bar_targets ------------------------------------------------------------
-
-def test_bar_targets_at_silence_are_the_idle_row():
-    # Silence must look exactly like idle, whatever the tick. Without this the
-    # pill twitches during the pauses between sentences.
-    for tick in (0, 7, 250):
-        assert wf.bar_targets(0.0, 13, tick) == pytest.approx(
-            wf.idle_heights(13)
-        )
-
-
-def test_bar_targets_stay_within_range():
-    for level in (0.0, 0.25, 0.5, 0.99, 1.0):
-        for tick in range(0, 120, 11):
-            targets = wf.bar_targets(level, 13, tick)
-            assert all(wf.IDLE_HEIGHT - 1e-9 <= h <= 1.0 for h in targets)
-
-
-def test_bar_targets_grow_with_level():
-    quiet = wf.bar_targets(0.2, 13, tick=0, wobble=0.0)
-    loud = wf.bar_targets(0.9, 13, tick=0, wobble=0.0)
-    assert all(l > q for q, l in zip(quiet, loud))
-
-
-def test_bar_targets_centre_exceeds_edges():
-    targets = wf.bar_targets(0.8, 13, tick=0, wobble=0.0)
-    assert targets[6] > targets[0]
-    assert targets[6] > targets[-1]
-
-
-def test_bar_targets_wobble_breaks_left_right_symmetry():
-    # Mirroring is vertical (each bar grows up and down equally); left-to-right
-    # the row must NOT be a perfect arch or it reads as a graphic, not a voice.
-    targets = wf.bar_targets(0.8, 13, tick=5)
-    assert targets != tuple(reversed(targets))
-
-
-def test_bar_targets_are_deterministic_in_tick():
-    assert wf.bar_targets(0.6, 13, tick=9) == wf.bar_targets(0.6, 13, tick=9)
-
-
-def test_bar_targets_move_between_consecutive_ticks():
-    assert wf.bar_targets(0.6, 13, tick=9) != wf.bar_targets(0.6, 13, tick=10)
 
 
 # --- ease_bars --------------------------------------------------------------
@@ -298,11 +180,12 @@ def test_transcribing_sweep_travels():
 
 
 def test_transcribing_is_never_as_tall_as_loud_speech():
-    # It must not look like it is still listening.
+    # It must not look like it is still listening. Speech reaches 1.0; the
+    # sweep has to stay obviously short of that.
     loudest_sweep = max(
         max(wf.transcribing_heights(13, t)) for t in range(0, 400)
     )
-    assert loudest_sweep < max(wf.bar_targets(1.0, 13, tick=0, wobble=0.0))
+    assert loudest_sweep < 0.75
 
 
 def test_transcribing_differs_from_idle():
@@ -338,3 +221,164 @@ def test_bar_layout_fits_inside_the_pill():
 
 def test_bar_layout_handles_a_single_bar():
     assert wf.bar_layout(150, 1, 4, 5) == pytest.approx((75.0,))
+
+
+# --- ScrollingWave ----------------------------------------------------------
+
+def run(wave, level, frames):
+    """Drive `frames` frames at a constant level; return the last heights."""
+    heights = None
+    for _ in range(frames):
+        heights = wave.update(level)
+    return heights
+
+
+def test_wave_starts_as_a_flat_resting_row():
+    assert wf.ScrollingWave(15).update(0.0) == pytest.approx(
+        wf.idle_heights(15)
+    )
+
+
+def test_wave_always_returns_one_height_per_bar():
+    wave = wf.ScrollingWave(15)
+    for _ in range(200):
+        assert len(wave.update(0.4)) == 15
+
+
+def test_silence_stays_at_the_resting_row():
+    assert run(wf.ScrollingWave(15), 0.0, 300) == pytest.approx(
+        wf.idle_heights(15)
+    )
+
+
+def test_new_audio_enters_at_the_left_edge():
+    # The defining behaviour. After one shift's worth of loud audio, the
+    # left-hand bar must be the one that moved -- not the centre, and not all
+    # of them together, which is what the old meter did.
+    # Three frames past the first shift, not on it: a bar entering at zero is
+    # still under the resting floor for its first ease step, so sampling exactly
+    # on the shift boundary shows nothing and proves nothing.
+    wave = wf.ScrollingWave(15)
+    heights = run(wave, 1.0, wf.SCROLL_FRAMES + 3)
+    assert heights[0] > heights[-1]
+    assert heights[1:] == pytest.approx(wf.idle_heights(14))
+
+
+def test_the_wave_travels_rightward():
+    # One loud burst, then silence: the peak must walk toward the right edge.
+    wave = wf.ScrollingWave(15)
+    run(wave, 1.0, wf.SCROLL_FRAMES)
+
+    positions = []
+    for _ in range(6):
+        heights = run(wave, 0.0, wf.SCROLL_FRAMES)
+        positions.append(max(range(15), key=lambda i: heights[i]))
+
+    assert positions == sorted(positions)
+    assert positions[-1] > positions[0]
+
+
+def test_the_oldest_bar_falls_off_the_right_edge():
+    wave = wf.ScrollingWave(15)
+    run(wave, 1.0, wf.SCROLL_FRAMES)
+    # Fifteen more shifts of silence pushes that burst right off the pill.
+    assert run(wave, 0.0, wf.SCROLL_FRAMES * 16) == pytest.approx(
+        wf.idle_heights(15)
+    )
+
+
+def test_a_captured_bar_keeps_its_height_as_it_travels():
+    # A bar's height is a fact about a past moment. If later audio could revise
+    # it, the pill would be showing a smear rather than a history.
+    wave = wf.ScrollingWave(15)
+    run(wave, 0.8, wf.SCROLL_FRAMES)
+    settled = run(wave, 0.0, wf.SCROLL_FRAMES * 2)
+    peak = max(settled)
+
+    # Now shout: the travelling bar must be unaffected by it.
+    after = run(wave, 1.0, wf.SCROLL_FRAMES)
+    assert max(after[1:]) == pytest.approx(peak, abs=0.02)
+
+
+def test_a_new_bar_eases_in_rather_than_popping():
+    # "The bar that just entered on the right can ease in from zero."
+    wave = wf.ScrollingWave(15)
+    run(wave, 1.0, wf.SCROLL_FRAMES)          # land just after a shift
+    rising = [wave.update(1.0)[0] for _ in range(wf.SCROLL_FRAMES - 1)]
+
+    assert rising == sorted(rising)           # climbing, never jumping
+    assert rising[0] < 1.0                    # did not arrive at full height
+    assert rising[-1] > rising[0]
+
+
+def test_the_newest_bar_never_finishes_easing_before_it_moves_on():
+    # A consequence of the design worth pinning down: a bar gets SCROLL_FRAMES
+    # frames at the left edge, which at EASE_ALPHA is not enough to arrive. It
+    # finishes climbing one position in, and that is what makes the leading edge
+    # of the trace look alive rather than stamped.
+    wave = wf.ScrollingWave(15)
+    assert run(wave, 1.0, wf.SCROLL_FRAMES * 8)[0] < 0.9
+
+
+def test_a_bar_reaches_full_height_a_couple_of_shifts_in():
+    wave = wf.ScrollingWave(15)
+    assert max(run(wave, 1.0, wf.SCROLL_FRAMES * 3)) > 0.9
+
+
+def test_louder_audio_makes_taller_bars():
+    peaks = [max(run(wf.ScrollingWave(15), lvl, 120)) for lvl in (0.2, 0.5, 0.9)]
+    assert peaks == sorted(peaks)
+
+
+def test_heights_never_leave_range():
+    wave = wf.ScrollingWave(15)
+    for frame in range(400):
+        heights = wave.update((frame % 17) / 17)
+        assert all(wf.IDLE_HEIGHT - 1e-9 <= h <= 1.0 for h in heights)
+
+
+def test_the_wave_drains_instead_of_resetting():
+    # "When I release the hotkey, let the existing wave scroll off to the left
+    # rather than resetting instantly." Feeding silence must not blank it.
+    wave = wf.ScrollingWave(15)
+    run(wave, 1.0, wf.SCROLL_FRAMES * 15)
+    loud = max(run(wave, 0.0, 1))
+
+    one_shift_later = max(run(wave, 0.0, wf.SCROLL_FRAMES))
+    assert one_shift_later > wf.IDLE_HEIGHT
+    assert one_shift_later == pytest.approx(loud, abs=0.15)
+
+
+def test_a_short_spike_between_shifts_is_not_lost():
+    # Peak-hold, not sampling. A 6-frame gap spans about one and a half audio
+    # blocks, so a consonant landing off the boundary would vanish entirely.
+    wave = wf.ScrollingWave(15, scroll_frames=6)
+    wave.update(0.0)
+    wave.update(0.0)
+    wave.update(1.0)          # the spike, mid-interval
+    for _ in range(3):
+        wave.update(0.0)
+    assert max(run(wave, 0.0, 30)) > wf.IDLE_HEIGHT + 0.2
+
+
+def test_history_spans_between_one_and_two_seconds_at_60fps():
+    # The brief said "the last second or two". This is that, as arithmetic --
+    # and it is what one-shift-per-frame would have failed.
+    seconds = wf.BAR_COUNT * wf.SCROLL_FRAMES / 60
+    assert 1.0 <= seconds <= 2.0
+
+
+def test_wave_is_deterministic():
+    a, b = wf.ScrollingWave(15), wf.ScrollingWave(15)
+    for frame in range(120):
+        assert a.update(frame / 120) == b.update(frame / 120)
+
+
+def test_wave_survives_a_nan_level():
+    wave = wf.ScrollingWave(15)
+    wave.update(float("nan"))
+    assert all(math.isfinite(h) for h in run(wave, 0.5, 60))
+
+
+def test_wave_clamps_a_level_outside_the_unit_range():
+    assert all(h <= 1.0 for h in run(wf.ScrollingWave(15), 4.0, 120))

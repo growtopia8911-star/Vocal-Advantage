@@ -429,41 +429,71 @@ def test_run_set_hotkey_reports_a_timeout_instead_of_ending_in_a_stack_trace(
 # --------------------------------------------------------------------------
 
 
-def test_run_app_sets_dpi_awareness_before_it_builds_the_first_window(
-    tmp_path, monkeypatch, capsys
+def test_run_app_sets_dpi_awareness_before_anything_could_make_a_window(
+    tmp_path, monkeypatch
 ):
     """Windows fixes a process's DPI awareness when its first window appears.
 
-    Called after tk.Tk(), set_dpi_awareness() is a silent no-op returning
-    E_ACCESSDENIED and the pill renders blurry on a scaled display. indicator_win
-    deliberately never calls it, so run_app is the single production call site
-    and the ordering is only checkable here.
-    """
-    import tkinter
+    Called after the fact it is a silent no-op returning E_ACCESSDENIED: the
+    pill renders blurry on a scaled display and the "bottom centre of the
+    screen" arithmetic is wrong above 100% scaling. Neither flowbar_win nor
+    pystray calls it for us, so _run_app_windows is the single production call
+    site and the ordering is only checkable here.
 
-    from vocal_advantage import indicator_win
+    The run is stopped at the model load, which sits between the DPI call and
+    every window this app can create -- the tray icon and the Flow Bar are both
+    built well after it. So reaching this point with the call already made is
+    what proves the ordering.
+    """
+    from vocal_advantage import flowbar_win
 
     order: list[str] = []
     monkeypatch.setattr(
-        indicator_win, "set_dpi_awareness", lambda: order.append("set_dpi_awareness")
+        flowbar_win, "set_dpi_awareness", lambda: order.append("set_dpi_awareness")
     )
 
-    class StopBeforeTheAppStarts(Exception):
+    class StopBeforeAnyWindowExists(Exception):
         pass
 
-    def fake_tk(*args, **kwargs):
-        order.append("tk.Tk")
-        raise StopBeforeTheAppStarts
+    def stop():
+        order.append("model load - no window yet")
+        raise StopBeforeAnyWindowExists
 
-    monkeypatch.setattr(tkinter, "Tk", fake_tk)
+    monkeypatch.setattr(va_main, "import_transcriber_class", stop)
 
-    with pytest.raises(StopBeforeTheAppStarts):
-        # The Windows launcher specifically: run_app now dispatches by platform,
-        # and this ordering is a Windows requirement. tk is faked, so it still
-        # runs anywhere.
+    with pytest.raises(StopBeforeAnyWindowExists):
+        # The Windows launcher specifically: run_app dispatches by platform,
+        # and this is a Windows requirement. Nothing real is touched, so it
+        # still runs anywhere.
         va_main._run_app_windows(tmp_path / "config.json")
 
-    assert order == ["set_dpi_awareness", "tk.Tk"]
+    assert order == ["set_dpi_awareness", "model load - no window yet"]
+
+
+def test_run_app_on_windows_does_not_import_tkinter(tmp_path, monkeypatch):
+    """Tk is gone from this project.
+
+    It is what used to own the main thread on Windows, which is why the tray
+    icon could not. Rendering the pill with UpdateLayeredWindow removed it, and
+    an accidental re-import would quietly take the main thread back.
+    """
+    import tkinter
+
+    touched = []
+    monkeypatch.setattr(tkinter, "Tk", lambda *a, **k: touched.append("Tk"))
+
+    class StopBeforeTheModelLoads(Exception):
+        pass
+
+    def stop():
+        raise StopBeforeTheModelLoads
+
+    monkeypatch.setattr(va_main, "import_transcriber_class", stop)
+
+    with pytest.raises(StopBeforeTheModelLoads):
+        va_main._run_app_windows(tmp_path / "config.json")
+
+    assert touched == []
 
 
 # --------------------------------------------------------------------------
@@ -961,3 +991,150 @@ def test_live_typing_is_paused_while_ai_cleanup_is_on():
     assert va_main.live_typing_enabled({}) is True
     assert va_main.live_typing_enabled({"ai_cleanup": False}) is True
     assert va_main.live_typing_enabled({"ai_cleanup": True}) is False
+
+
+# --------------------------------------------------------------------------
+# The UI is decoration: losing it must never cost dictation
+# --------------------------------------------------------------------------
+
+
+class _Recorder:
+    def __init__(self, recording=True, explode=False):
+        self.is_recording = recording
+        self.stopped = False
+        self._explode = explode
+
+    def stop(self):
+        if self._explode:
+            raise RuntimeError("the mic was unplugged")
+        self.stopped = True
+
+
+class _Listener:
+    def __init__(self, explode=False):
+        self.stopped = False
+        self._explode = explode
+
+    def stop(self):
+        if self._explode:
+            raise RuntimeError("the hook was already gone")
+        self.stopped = True
+
+
+class _Worker:
+    def __init__(self):
+        self.joined = False
+
+    def join(self, timeout=None):
+        self.joined = True
+
+    def is_alive(self):
+        return False
+
+
+def test_the_flow_bar_is_skipped_when_config_switches_it_off(capsys):
+    cfg = {"flow_bar": False, "flow_bar_position": "bottom-centre"}
+    assert va_main._make_flow_bar(cfg, object()) is None
+    assert "tray icon only" in capsys.readouterr().out
+
+
+def test_a_flow_bar_that_will_not_start_is_survivable(monkeypatch, capsys):
+    """Dictation is the product; the overlay is decoration."""
+    import vocal_advantage.flowbar_mac as flowbar_mac
+    import vocal_advantage.flowbar_win as flowbar_win
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("no window server")
+
+    monkeypatch.setattr(flowbar_mac, "FlowBar", explode)
+    monkeypatch.setattr(flowbar_win, "FlowBar", explode)
+
+    cfg = {"flow_bar": True, "flow_bar_position": "bottom-centre"}
+    assert va_main._make_flow_bar(cfg, object()) is None
+    assert "unaffected" in capsys.readouterr().err
+
+
+def test_a_tray_icon_that_will_not_start_is_survivable(monkeypatch, capsys):
+    import vocal_advantage.tray_mac as tray_mac
+    import vocal_advantage.tray_win as tray_win
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("no status bar")
+
+    monkeypatch.setattr(tray_mac, "TrayIcon", explode)
+    monkeypatch.setattr(tray_win, "TrayIcon", explode)
+
+    assert va_main._make_tray(object(), lambda: None) is None
+    assert "unaffected" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Quit: "shuts down cleanly ... no orphan processes"
+# --------------------------------------------------------------------------
+
+
+def test_quit_releases_the_keyboard_the_mic_and_the_thread():
+    events: "queue.Queue" = queue.Queue()
+    stop_event = threading.Event()
+    listener, recorder, worker = _Listener(), _Recorder(), _Worker()
+
+    va_main._stop_dictation(listener, recorder, worker, events, stop_event)
+
+    assert listener.stopped, "the hotkey hook is still installed"
+    assert stop_event.is_set(), "the controller thread was never told to stop"
+    assert worker.joined, "the controller thread was never waited for"
+    assert recorder.stopped, "the microphone stream is still open"
+
+
+def test_quit_queues_the_sentinel_that_unblocks_a_waiting_loop():
+    # Without it the controller thread sits in queue.get() forever and the
+    # join() above times out -- the exact shape of an orphan.
+    events: "queue.Queue" = queue.Queue()
+    va_main._stop_dictation(
+        _Listener(), _Recorder(), _Worker(), events, threading.Event()
+    )
+    assert events.get_nowait() is None
+
+
+def test_quit_does_not_stop_a_recorder_that_was_not_recording():
+    recorder = _Recorder(recording=False)
+    va_main._stop_dictation(
+        _Listener(), recorder, _Worker(), queue.Queue(), threading.Event()
+    )
+    assert not recorder.stopped
+
+
+def test_quit_still_releases_the_mic_when_the_hotkey_hook_fails(capsys):
+    # Order matters: the listener is stopped first, and if that raising skipped
+    # the rest, the microphone light would stay on after quitting.
+    recorder = _Recorder()
+    va_main._stop_dictation(
+        _Listener(explode=True), recorder, _Worker(), queue.Queue(),
+        threading.Event(),
+    )
+    assert recorder.stopped
+
+
+def test_quit_survives_a_microphone_that_fails_to_close(capsys):
+    va_main._stop_dictation(
+        _Listener(), _Recorder(explode=True), _Worker(), queue.Queue(),
+        threading.Event(),
+    )
+    assert "the mic was unplugged" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the Cocoa run loop")
+def test_quit_on_mac_stops_the_run_loop_so_the_process_can_exit(monkeypatch):
+    """Tearing down without stopping the loop leaves an invisible orphan.
+
+    No icon, no window, still running -- which is precisely what "no orphan
+    processes" rules out, and impossible to notice by looking.
+    """
+    from PyObjCTools import AppHelper
+
+    order = []
+    monkeypatch.setattr(AppHelper, "stopEventLoop", lambda: order.append("stop loop"))
+
+    va_main._quit_mac(lambda: order.append("shutdown"))()
+
+    assert order == ["shutdown", "stop loop"]

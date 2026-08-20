@@ -54,14 +54,15 @@ MESSAGE_PADDING = 22.0
 # --- how bright the pill and its bars are in each state ---------------------
 # The pill brightens slightly while recording; idle is dimmer than everything
 # else because it is what you look at all day.
-#: Opacity of the pill's black OUTLINE -- there is no fill any more, so this is
-#: how firm the edge looks rather than how solid the body is. Higher than the
-#: old fill values because a half-transparent outline just reads as grey.
+#: Opacity of the whole pill -- ground and outline together, so a state change
+#: firms up the entire object rather than tinting part of it. Not fully opaque
+#: at rest: it sits over your work all day and should look laid on the screen
+#: rather than punched into it.
 PILL_ALPHA = {
-    IDLE: 0.80,
-    RECORDING: 1.0,
+    IDLE: 0.82,
+    RECORDING: 0.96,
     TRANSCRIBING: 0.90,
-    MESSAGE: 1.0,
+    MESSAGE: 0.96,
 }
 BAR_ALPHA = {
     IDLE: 0.55,
@@ -133,7 +134,7 @@ class Indicator:
         # "Idle" while dictation worked perfectly.
         self._status = STATUS_TEXT[IDLE]
 
-        self._envelope = wf.Envelope()
+        self._wave = wf.ScrollingWave(n_bars)
         self._heights = wf.idle_heights(n_bars)
         self._width = float(wf.PILL_WIDTH)
         self._pill_alpha = PILL_ALPHA[IDLE]
@@ -182,8 +183,7 @@ class Indicator:
         if self._mode == MESSAGE and self._frames >= MESSAGE_FRAMES:
             self._mode, self._text = IDLE, ""
 
-        targets = self._targets()
-        self._heights = wf.ease_bars(self._heights, targets, wf.EASE_ALPHA)
+        self._heights = self._advance_wave()
 
         target_width = (
             message_width(self._text)
@@ -214,18 +214,30 @@ class Indicator:
 
     # --- internals ----------------------------------------------------------
 
-    def _targets(self) -> tuple[float, ...]:
-        if self._mode == RECORDING:
-            level = wf.level_from_rms(self._read_level())
-            return wf.bar_targets(
-                self._envelope.update(level), self._n_bars, self._frames
-            )
-        # Everything else has stopped listening, so the envelope must not carry
-        # the last loud syllable into the next recording.
-        self._envelope = wf.Envelope()
+    def _advance_wave(self) -> tuple[float, ...]:
+        """One frame of the scrolling trace, whatever state we are in.
+
+        The wave is fed in *every* state, not only while recording, and that is
+        what makes releasing the hotkey look right: the trace keeps scrolling
+        with silence behind it, so what you just said drifts off the left edge
+        instead of being blanked the instant you let go.
+        """
+        level = (
+            wf.level_from_rms(self._read_level())
+            if self._mode == RECORDING
+            else 0.0
+        )
+        wave = self._wave.update(level)
+
         if self._mode == TRANSCRIBING:
-            return wf.transcribing_heights(self._n_bars, self._frames)
-        return wf.idle_heights(self._n_bars)
+            # Max, not replace: for the first second the draining trace is
+            # still taller than the sweep and shows through, and the sweep
+            # takes over by itself as the trace empties. A hard switch here
+            # would produce exactly the instant reset the scrolling is meant
+            # to avoid.
+            sweep = wf.transcribing_heights(self._n_bars, self._frames)
+            return tuple(max(w, s) for w, s in zip(wave, sweep))
+        return wave
 
     def _read_level(self) -> float:
         """The current mic RMS. Never raises, and never blocks the renderer.

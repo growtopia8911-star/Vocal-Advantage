@@ -58,6 +58,8 @@ def test_defaults_has_exactly_the_spec_keys():
         "min_duration_s",
         "max_duration_s",
         "clean_speech",
+        "flow_bar",
+        "flow_bar_position",
         "ai_cleanup",
     }
 
@@ -199,3 +201,99 @@ def test_the_default_hotkey_matches_the_platform():
     expected = "right alt" if sys.platform == "darwin" else "right ctrl"
     assert DEFAULT_HOTKEY == expected
     assert DEFAULTS["hotkey"] == DEFAULT_HOTKEY
+
+
+# ---------------------------------------------------------------------------
+# The Flow Bar's two settings
+# ---------------------------------------------------------------------------
+#
+# Same contract as the hotkey: config.json is hand-edited, so a bad value warns
+# and falls back FOR THIS RUN only, and the file is left exactly as typed so the
+# mistake is still visible and fixable.
+
+
+def test_defaults_include_the_flow_bar_settings():
+    assert DEFAULTS["flow_bar"] is True
+    assert DEFAULTS["flow_bar_position"] == "bottom-centre"
+
+
+def test_a_fresh_config_has_the_flow_bar_settings(tmp_path):
+    cfg = load_config(tmp_path / "config.json")
+    assert cfg["flow_bar"] is True
+    assert cfg["flow_bar_position"] == "bottom-centre"
+
+
+def test_an_existing_config_gains_the_new_keys(tmp_path):
+    # Upgrading in place: someone already has a config.json from before the
+    # Flow Bar existed, and must not have to delete it.
+    path = tmp_path / "config.json"
+    path.write_text('{"hotkey": "right alt"}', encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg["hotkey"] == "right alt"
+    assert cfg["flow_bar"] is True
+    assert cfg["flow_bar_position"] == "bottom-centre"
+
+
+def test_the_flow_bar_can_be_switched_off(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"flow_bar": false}', encoding="utf-8")
+    assert load_config(path)["flow_bar"] is False
+
+
+@pytest.mark.parametrize(
+    "position", ["bottom-centre", "bottom-left", "bottom-right"]
+)
+def test_every_documented_position_is_accepted(tmp_path, position):
+    path = tmp_path / "config.json"
+    path.write_text(f'{{"flow_bar_position": "{position}"}}', encoding="utf-8")
+    assert load_config(path)["flow_bar_position"] == position
+
+
+def test_the_american_spelling_is_accepted_too(tmp_path):
+    # The muscle memory is real, and rejecting it would be a papercut that
+    # taught nobody anything.
+    path = tmp_path / "config.json"
+    path.write_text('{"flow_bar_position": "bottom-center"}', encoding="utf-8")
+    assert load_config(path)["flow_bar_position"] == "bottom-centre"
+
+
+def test_an_unknown_position_warns_and_falls_back(tmp_path, capsys):
+    path = tmp_path / "config.json"
+    path.write_text('{"flow_bar_position": "middle"}', encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg["flow_bar_position"] == "bottom-centre"
+    assert "middle" in capsys.readouterr().err
+
+
+def test_a_non_text_position_warns_and_falls_back(tmp_path, capsys):
+    path = tmp_path / "config.json"
+    path.write_text('{"flow_bar_position": 3}', encoding="utf-8")
+    assert load_config(path)["flow_bar_position"] == "bottom-centre"
+    assert capsys.readouterr().err != ""
+
+
+def test_a_bad_position_does_not_rewrite_the_file(tmp_path):
+    # The user must still be able to see what they typed.
+    path = tmp_path / "config.json"
+    original = '{"flow_bar_position": "middle"}'
+    path.write_text(original, encoding="utf-8")
+    load_config(path)
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_a_non_boolean_flow_bar_warns_and_falls_back(tmp_path, capsys):
+    path = tmp_path / "config.json"
+    path.write_text('{"flow_bar": "yes"}', encoding="utf-8")
+    assert load_config(path)["flow_bar"] is True
+    assert capsys.readouterr().err != ""
+
+
+def test_a_bad_position_does_not_stop_the_app_starting(tmp_path):
+    # The rule for this whole file: decoration never blocks dictation.
+    path = tmp_path / "config.json"
+    path.write_text(
+        '{"hotkey": "right alt", "flow_bar_position": "nowhere"}',
+        encoding="utf-8",
+    )
+    cfg = load_config(path)
+    assert cfg["hotkey"] == "right alt"

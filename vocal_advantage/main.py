@@ -25,6 +25,9 @@ from typing import Callable
 
 from vocal_advantage import cuda_dlls
 from vocal_advantage.config import CONFIG_PATH, load_config, save_config
+# Re-exported so `main.say(...)` reads as intended; the implementation lives in
+# console.py so config.py can use it without an import cycle.
+from vocal_advantage.console import say, warn
 from vocal_advantage.controller import DictationController
 from vocal_advantage.hotkey_spec import HotkeyError, HotkeySpec, parse_hotkey
 from vocal_advantage.cleanup import ai_clean, clean_speech, warm_up_model
@@ -118,7 +121,7 @@ class NarratingTranscriber:
         text = self._inner.transcribe(audio)
         took = time.monotonic() - started
         seconds = len(audio) / self.SAMPLE_RATE
-        print(f"  [heard {seconds:.1f}s of audio in {took:.2f}s] {text!r}", flush=True)
+        say(f"  [heard {seconds:.1f}s of audio in {took:.2f}s] {text!r}")
         return text
 
 
@@ -143,14 +146,13 @@ def _warm_up_ai_cleanup(cfg: dict) -> None:
     """
     if not cfg.get("ai_cleanup", False):
         return
-    print("Warming up the AI cleanup model ...", flush=True)
+    say("Warming up the AI cleanup model ...")
     if warm_up_model():
-        print("AI cleanup ready.", flush=True)
+        say("AI cleanup ready.")
     else:
-        print(
+        warn(
             "WARNING: AI cleanup is on but Ollama did not answer. Filler and "
-            "stutter removal still works; the extra pass will be skipped.",
-            file=sys.stderr, flush=True,
+            "stutter removal still works; the extra pass will be skipped."
         )
 
 
@@ -257,10 +259,9 @@ class LiveDictation:
         self._next_pass_at = self._clock() + max(took, self.MIN_GAP_S)
         fresh = self._session.commit(text)
         if fresh:
-            print(
+            say(
                 f"  [live +{audio.size / self.SAMPLE_RATE:.1f}s in {took:.2f}s]"
-                f" {fresh.strip()!r}",
-                flush=True,
+                f" {fresh.strip()!r}"
             )
             self._type_partial(fresh)
 
@@ -290,10 +291,9 @@ class ConsoleIndicator:
     """
 
     def _say(self, message: str) -> None:
-        try:
-            print(message, flush=True)
-        except Exception:  # noqa: BLE001
-            pass
+        # console.say already swallows a missing or broken stream, which is the
+        # whole reason it exists; nothing extra is needed here.
+        say(message)
 
     def show_recording(self) -> None:
         self._say("  [listening]")
@@ -389,8 +389,11 @@ def _safe_call(what: str, function: Callable[..., object], *args: object) -> Non
     try:
         function(*args)
     except Exception:  # noqa: BLE001 - deliberately broad; this is the crash barrier
-        print("Error in %s:" % what, file=sys.stderr)
-        traceback.print_exc()
+        # format_exc + warn, never traceback.print_exc(): that writes straight
+        # to sys.stderr, which is None under pythonw and in a .app bundle, so
+        # the crash barrier would itself crash.
+        warn("Error in %s:" % what)
+        warn(traceback.format_exc())
 
 
 def controller_loop(
@@ -443,20 +446,20 @@ def run_set_hotkey(
     key leaves the file exactly as it was.
     """
     for attempt in range(1, attempts + 1):
-        print("Hold the key or combo you want, then release it.")
+        say("Hold the key or combo you want, then release it.")
         try:
             spec = capture()
         except HotkeyError as error:
-            print("That will not work as a hotkey: %s" % error, file=sys.stderr)
+            warn("That will not work as a hotkey: %s" % error)
             if attempt < attempts:
-                print("Try a different key.\n", file=sys.stderr)
+                warn("Try a different key.\n")
             continue
         except TimeoutError as error:
             # capture_hotkey's other documented failure (Task 6's contract).
             # Not retried: a timeout means nobody is at the keyboard, so asking
             # twice more just makes them wait another 30 seconds for the same
             # answer. Uncaught it would end --set-hotkey in a stack trace.
-            print("%s" % error, file=sys.stderr)
+            warn("%s" % error)
             break
 
         cfg = load_config(config_path)
@@ -465,51 +468,116 @@ def run_set_hotkey(
         cfg["hotkey"] = "+".join(sorted(spec.keys))
         save_config(cfg, config_path)
 
-        print("Hotkey set to %s - saved to %s" % (spec, config_path))
-        print("Restart Vocal Advantage for the new hotkey to take effect.")
+        say("Hotkey set to %s - saved to %s" % (spec, config_path))
+        say("Restart Vocal Advantage for the new hotkey to take effect.")
         return 0
 
-    print("Hotkey unchanged.", file=sys.stderr)
+    warn("Hotkey unchanged.")
     return 1
 
 
-def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
-    """Build the object graph, start the threads, and hand the main thread to tk."""
-    # These imports are function-local on purpose. tkinter, sounddevice and the
-    # keyboard hook are all real hardware/OS bindings; keeping them out of module
-    # scope means `import vocal_advantage.main` stays cheap and testable, and it
-    # makes it structurally impossible to accidentally import the model stack
-    # before import_transcriber_class() has run prepare().
-    import tkinter as tk
+def _make_flow_bar(cfg: dict, indicator):
+    """The overlay, or None if it is switched off or refuses to start.
 
+    Never raises. Dictation is the product and the bar is decoration: losing it
+    costs a warning on the console and nothing else.
+    """
+    if not cfg.get("flow_bar", True):
+        say("Flow bar off in config.json - tray icon only.")
+        return None
+    try:
+        if sys.platform == "darwin":
+            from vocal_advantage.flowbar_mac import FlowBar
+        else:
+            from vocal_advantage.flowbar_win import FlowBar
+
+        bar = FlowBar(indicator, position=cfg["flow_bar_position"])
+        bar.open()
+        return bar
+    except Exception:  # noqa: BLE001 - decoration must never stop dictation
+        warn("The floating bar could not be created, so there is no overlay.")
+        warn("Dictation and the hotkey are unaffected.")
+        warn(traceback.format_exc())
+        return None
+
+
+def _make_tray(indicator, on_quit: Callable[[], None]):
+    """The tray / menu-bar icon, or None if it refuses to start. Never raises."""
+    try:
+        if sys.platform == "darwin":
+            from vocal_advantage.tray_mac import TrayIcon
+        else:
+            from vocal_advantage.tray_win import TrayIcon
+
+        return TrayIcon(indicator, on_quit)
+    except Exception:  # noqa: BLE001 - as above
+        warn("The tray icon could not be created.")
+        warn("Dictation and the hotkey are unaffected; press Ctrl+C to quit.")
+        warn(traceback.format_exc())
+        return None
+
+
+def _stop_dictation(listener, recorder, worker, events, stop_event) -> None:
+    """Put the microphone and the keyboard down. Order matters; see comments."""
+    # Hook first: no new key events may arrive while the rest is torn down.
+    _safe_call("hotkey listener stop", listener.stop)
+    if sys.platform == "win32":
+        try:
+            import keyboard
+
+            keyboard.unhook_all()  # belt and braces: nothing may still see keys
+        except Exception:  # noqa: BLE001
+            pass
+
+    stop_event.set()
+    events.put(None)  # unblocks the loop if it is sitting in get()
+    worker.join(timeout=5.0)
+
+    try:
+        if recorder.is_recording:
+            # Closes the stream, so the "microphone in use" light goes out.
+            recorder.stop()
+    except Exception:  # noqa: BLE001
+        warn(traceback.format_exc())
+
+
+def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
+    """Build the object graph, start the threads, hand the main thread to the tray.
+
+    The tray owns the main thread here, which it could not while the pill was a
+    tkinter window. `flowbar_win` renders with UpdateLayeredWindow on its own
+    thread instead, so nothing else competes for it.
+    """
+    # Function-local on purpose: sounddevice and the keyboard hook are real
+    # hardware bindings, so `import vocal_advantage.main` stays cheap and
+    # testable, and it is structurally impossible to import the model stack
+    # before import_transcriber_class() has run prepare().
     from vocal_advantage import paste_win
+    from vocal_advantage.flowbar import Indicator
+    from vocal_advantage.flowbar_win import set_dpi_awareness
     from vocal_advantage.hotkey_win import HotkeyListener
-    from vocal_advantage.indicator_win import Indicator, set_dpi_awareness
     from vocal_advantage.recorder import Recorder
 
     cfg = load_config(config_path)
-    # load_config already warned and substituted the default if this was garbage,
-    # so this parse cannot raise.
+    # load_config already warned and substituted the default if this was
+    # garbage, so this parse cannot raise.
     spec = parse_hotkey(cfg["hotkey"])
-    print("Hotkey: %s" % spec)
+    say("Hotkey: %s" % spec)
 
-    # MUST be before tk.Tk(). Windows fixes a process's DPI awareness when that
-    # process creates its first window; called afterwards this is a silent no-op
-    # answering E_ACCESSDENIED, the pill renders blurry on a scaled display, and
-    # the "bottom centre of the screen" pixel maths is wrong above 100% scaling.
-    # indicator_win deliberately never calls it for us, so this is the single
-    # production call site (Task 8's contract) - keep it directly above tk.Tk().
+    # MUST be before any window exists. Windows fixes a process's DPI awareness
+    # when that process creates its first window; called afterwards it is a
+    # silent no-op answering E_ACCESSDENIED, the pill renders blurry on a
+    # scaled display, and the "bottom centre of the screen" arithmetic is wrong
+    # above 100% scaling. Neither flowbar_win nor pystray calls it for us.
     set_dpi_awareness()
 
-    # tkinter owns the main thread. The root itself is never shown - the only
-    # visible window is the Toplevel the Indicator makes for itself.
-    root = tk.Tk()
-    root.withdraw()
-    indicator = Indicator(root)
+    recorder = Recorder()
+    # The level tap the waveform reads. A plain float on the recorder, written
+    # by PortAudio's thread and read here lock-free -- there is no second
+    # microphone stream anywhere in this project.
+    indicator = Indicator(level_source=lambda: recorder.level)
 
-    print(
-        "Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"])
-    )
+    say("Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"]))
     transcriber_cls = import_transcriber_class()
     transcriber = transcriber_cls(
         model_name=cfg["model"],
@@ -517,19 +585,18 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
         language=cfg["language"],
         min_duration_s=float(cfg["min_duration_s"]),
     )
-    # The first transcribe() pays 1-3s of CUDA init. Paying it now, at startup,
-    # is what makes the first real dictation as fast as the tenth.
+    # The first transcribe() pays 1-3s of CUDA init. Paying it now is what
+    # makes the first real dictation as fast as the tenth.
     transcriber.warm_up()
-    print("Model ready.")
+    say("Model ready.")
     _warm_up_ai_cleanup(cfg)
 
-    recorder = Recorder()
     controller = DictationController(
         hotkey=spec,
         recorder=recorder,
         transcriber=transcriber,
-        # The paste_win module itself satisfies the paster protocol: it exposes a
-        # module-level paste_text(str) -> bool, which is the whole interface.
+        # paste_win itself satisfies the paster protocol: a module-level
+        # paste_text(str) -> bool is the whole interface.
         paster=CleaningPaster(paste_win, clean=_cleaner(cfg)),
         indicator=indicator,
         min_duration_s=float(cfg["min_duration_s"]),
@@ -547,12 +614,17 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     worker.start()
 
     def on_key(key_name: str, is_down: bool) -> None:
-        # Runs on the keyboard hook's thread. It must do nothing but enqueue -
+        # Runs on the keyboard hook's thread. It must do nothing but enqueue --
         # any real work here would block Windows' low-level keyboard hook.
         events.put((key_name, is_down))
 
     listener = HotkeyListener(spec, on_key)
     listener.start()
+
+    # UI last: by here the hotkey already works, so anything below failing
+    # costs decoration and never dictation.
+    bar = _make_flow_bar(cfg, indicator)
+    tray = _make_tray(indicator, lambda: None)
 
     shutting_down = threading.Event()
 
@@ -560,56 +632,33 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
         if shutting_down.is_set():
             return
         shutting_down.set()
-        print("Shutting down ...")
+        say("Shutting down ...")
+        _stop_dictation(listener, recorder, worker, events, stop_event)
+        if bar is not None:
+            _safe_call("flow bar close", bar.close)
+        if tray is not None:
+            _safe_call("tray stop", tray.stop)
 
-        _safe_call("hotkey listener stop", listener.stop)
+    if tray is not None:
+        tray._on_quit = shutdown  # the menu's Quit item
+        say("Ready. Hold %s and speak. Quit from the tray icon." % spec)
         try:
-            import keyboard
-
-            keyboard.unhook_all()  # belt and braces: nothing may still see keys
-        except Exception:  # noqa: BLE001
-            pass
-
-        stop_event.set()
-        events.put(None)  # unblock the loop if it is sitting in get()
-        worker.join(timeout=5.0)
-
-        try:
-            if recorder.is_recording:
-                recorder.stop()  # closes the stream so the Windows mic light goes out
-        except Exception:  # noqa: BLE001
-            traceback.print_exc()
-
-        _safe_call("indicator hide", indicator.hide)
-        root.quit()
-
-    root.protocol("WM_DELETE_WINDOW", shutdown)
-
-    def heartbeat() -> None:
-        # A repeating tk callback is what lets Ctrl+C in the console interrupt
-        # mainloop at all: Python only runs signal handlers between bytecodes,
-        # and mainloop otherwise blocks inside Tcl.
-        if not worker.is_alive() and not shutting_down.is_set():
-            print("Controller thread stopped unexpectedly.", file=sys.stderr)
+            tray.run()          # blocks on the main thread until Quit
+        except KeyboardInterrupt:
+            say("")
+        finally:
             shutdown()
-            return
-        root.after(HEARTBEAT_MS, heartbeat)
+        return 0
 
-    # Indicator.pump re-arms itself with root.after; this just starts it.
-    root.after(UI_PUMP_MS, indicator.pump)
-    root.after(HEARTBEAT_MS, heartbeat)
-
-    print("Ready. Hold %s and speak. Close this console window to quit." % spec)
+    # No tray: fall back to waiting, so dictation still works with no UI at all.
+    say("Ready. Hold %s and speak. Press Ctrl+C to quit." % spec)
     try:
-        root.mainloop()
+        while worker.is_alive():
+            time.sleep(0.2)
     except KeyboardInterrupt:
-        print("")
+        say("")
     finally:
         shutdown()
-        try:
-            root.destroy()
-        except Exception:  # noqa: BLE001
-            pass
     return 0
 
 
@@ -622,10 +671,7 @@ def main(argv: list[str] | None = None) -> int:
 
     lock = acquire_single_instance_lock()
     if lock is None:
-        print(
-            "Vocal Advantage is already running. Close the other window first.",
-            file=sys.stderr,
-        )
+        warn("Vocal Advantage is already running. Quit the other copy first.")
         return 1
     _INSTANCE_LOCK = lock
 
@@ -640,26 +686,32 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
-    """The macOS launcher. No tkinter, no pill, no CUDA.
+    """The macOS launcher. One NSApplication on the main thread; no tkinter.
 
-    Deliberately does not build a Tk root: with no overlay there is nothing to
-    draw, and creating one would put a Python rocket in the Dock and steal focus
-    at launch -- the exact thing the Windows pill goes to such lengths to avoid.
+    The menu-bar icon and the Flow Bar are both AppKit, so they share a single
+    run loop and there is no contention for the main thread. The event tap needs
+    a CFRunLoop too, but HotkeyListener owns one on its own thread.
 
-    The event tap needs a CFRunLoop, but HotkeyListener owns one on its own
-    thread, so the main thread here just waits.
+    Accessory activation policy (see flowbar_mac.ensure_app) is what keeps this
+    process out of the Dock and out of Cmd-Tab -- the thing the earlier macOS
+    port avoided a Tk root in order to dodge.
     """
     from vocal_advantage import paste_mac
+    from vocal_advantage.flowbar import Indicator
     from vocal_advantage.hotkey_mac import HotkeyListener, HotkeyPermissionError
     from vocal_advantage.recorder import Recorder
 
     cfg = load_config(config_path)
     spec = parse_hotkey(cfg["hotkey"])
-    print("Hotkey: %s" % spec)
+    say("Hotkey: %s" % spec)
 
-    indicator = ConsoleIndicator()
+    recorder = Recorder()
+    # The level tap the waveform reads: a plain float on the recorder, written
+    # by PortAudio's thread and read lock-free by the renderer. No second
+    # microphone stream.
+    indicator = Indicator(level_source=lambda: recorder.level)
 
-    print("Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"]))
+    say("Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"]))
     transcriber_cls = import_transcriber_class()
     transcriber = transcriber_cls(
         model_name=cfg["model"],
@@ -668,10 +720,9 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         min_duration_s=float(cfg["min_duration_s"]),
     )
     transcriber.warm_up()
-    print("Model ready.")
+    say("Model ready.")
     _warm_up_ai_cleanup(cfg)
 
-    recorder = Recorder()
     # The raw transcriber for partial passes: narrating every one of them would
     # bury the console. The final transcript still gets reported.
     live = LiveDictation(
@@ -712,31 +763,86 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     try:
         listener.start()
     except HotkeyPermissionError as error:
-        print("", file=sys.stderr)
-        print(error, file=sys.stderr)
+        warn("")
+        warn(str(error))
         stop_event.set()
         events.put(None)
         worker.join(timeout=2.0)
         return 1
 
-    print("Ready. Hold %s and speak. Press Ctrl+C to quit." % spec)
+    # UI last: the hotkey already works by here, so anything below failing costs
+    # decoration and never dictation.
+    from vocal_advantage.flowbar_mac import ensure_app
+
+    app = None
+    try:
+        app = ensure_app()
+    except Exception:  # noqa: BLE001
+        warn("No NSApplication, so there is no menu bar icon and no overlay.")
+        warn(traceback.format_exc())
+
+    bar = _make_flow_bar(cfg, indicator) if app is not None else None
+    tray = _make_tray(indicator, lambda: None) if app is not None else None
+
+    shutting_down = threading.Event()
+
+    def shutdown() -> None:
+        if shutting_down.is_set():
+            return
+        shutting_down.set()
+        say("Shutting down ...")
+        _stop_dictation(listener, recorder, worker, events, stop_event)
+        if bar is not None:
+            _safe_call("flow bar close", bar.close)
+        if tray is not None:
+            _safe_call("tray stop", tray.stop)
+
+    if tray is not None:
+        tray._on_quit = _quit_mac(shutdown)
+        _safe_call("tray start", tray.start)
+
+    if app is not None and (tray is not None or bar is not None):
+        from PyObjCTools import AppHelper
+
+        say("Ready. Hold %s and speak. Quit from the menu bar icon." % spec)
+        try:
+            AppHelper.runEventLoop()
+        except KeyboardInterrupt:
+            say("")
+        finally:
+            shutdown()
+        return 0
+
+    # No UI at all: wait, exactly as this launcher did before it had any.
+    say("Ready. Hold %s and speak. Press Ctrl+C to quit." % spec)
     try:
         while worker.is_alive():
             time.sleep(0.2)
     except KeyboardInterrupt:
-        print("")
+        say("")
     finally:
-        print("Shutting down ...")
-        _safe_call("hotkey listener stop", listener.stop)
-        stop_event.set()
-        events.put(None)
-        worker.join(timeout=5.0)
-        try:
-            if recorder.is_recording:
-                recorder.stop()  # close the stream so the mic indicator goes out
-        except Exception:  # noqa: BLE001
-            traceback.print_exc()
+        shutdown()
     return 0
+
+
+def _quit_mac(shutdown: Callable[[], None]) -> Callable[[], None]:
+    """Shut down, then stop the Cocoa run loop so the process actually exits.
+
+    Without the second half the menu's Quit tears everything down and then sits
+    in runEventLoop forever with no icon and no window -- an invisible orphan,
+    which is precisely what "no orphan processes" rules out.
+    """
+
+    def quit_now() -> None:
+        shutdown()
+        try:
+            from PyObjCTools import AppHelper
+
+            AppHelper.stopEventLoop()
+        except Exception:  # noqa: BLE001 - exiting regardless
+            pass
+
+    return quit_now
 
 
 def run_app(config_path: Path = CONFIG_PATH) -> int:

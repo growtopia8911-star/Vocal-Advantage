@@ -11,6 +11,7 @@ import json
 import sys
 from pathlib import Path
 
+from .console import warn
 from .hotkey_spec import HotkeyError, parse_hotkey
 
 # __file__ is <repo>/vocal_advantage/config.py, so parent.parent is the repo
@@ -47,7 +48,20 @@ DEFAULTS: dict = {
     # the key, and it pauses the word-by-word preview -- the model can only
     # clean a finished sentence. Filler removal above does not depend on it.
     "ai_cleanup": False,
+    # The always-on-screen waveform pill. Set false to keep the tray icon and
+    # the hotkey with no overlay at all; dictation is unaffected either way.
+    "flow_bar": True,
+    # Where it sits. See FLOW_BAR_POSITIONS.
+    "flow_bar_position": "bottom-centre",
 }
+
+#: The positions the Flow Bar understands. "bottom-center" is accepted as an
+#: alias and normalised to the British spelling the rest of the project uses --
+#: rejecting a spelling would be a papercut that taught nobody anything.
+FLOW_BAR_POSITIONS: tuple[str, ...] = (
+    "bottom-centre", "bottom-left", "bottom-right",
+)
+_POSITION_ALIASES = {"bottom-center": "bottom-centre"}
 
 
 def save_config(cfg: dict, path: Path = CONFIG_PATH) -> None:
@@ -64,6 +78,8 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     - Hotkey unusable: a warning on stderr and ``DEFAULTS["hotkey"]`` used for
       this run. The file itself is left alone so the user can still see what
       they typed and fix it.
+    - Flow Bar settings unusable: same treatment. A mistyped overlay position
+      must never be the reason dictation will not start.
     """
     if not path.exists():
         cfg = dict(DEFAULTS)
@@ -87,12 +103,44 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
             )
         parse_hotkey(hotkey)
     except HotkeyError as exc:
-        print(
+        warn(
             f"WARNING: {path}: {exc} "
             f"Falling back to the default hotkey {DEFAULTS['hotkey']!r} "
-            f"for this run.",
-            file=sys.stderr,
+            f"for this run."
         )
         cfg["hotkey"] = DEFAULTS["hotkey"]
 
+    cfg["flow_bar"] = _checked_flow_bar(cfg["flow_bar"], path)
+    cfg["flow_bar_position"] = _checked_position(cfg["flow_bar_position"], path)
+
     return cfg
+
+
+def _checked_flow_bar(value: object, path: Path) -> bool:
+    """A real bool, or the default with a warning.
+
+    Deliberately not ``bool(value)``: that would quietly read the string
+    ``"false"`` as True, which is the exact mistake someone hand-editing JSON
+    is most likely to make.
+    """
+    if isinstance(value, bool):
+        return value
+    warn(
+        f"WARNING: {path}: flow_bar must be true or false, not {value!r}. "
+        f"Using {DEFAULTS['flow_bar']!r} for this run."
+    )
+    return DEFAULTS["flow_bar"]
+
+
+def _checked_position(value: object, path: Path) -> str:
+    """A known position, or the default with a warning."""
+    if isinstance(value, str):
+        normalised = _POSITION_ALIASES.get(value.strip().lower(), value.strip().lower())
+        if normalised in FLOW_BAR_POSITIONS:
+            return normalised
+    warn(
+        f"WARNING: {path}: flow_bar_position {value!r} is not one of "
+        f"{', '.join(FLOW_BAR_POSITIONS)}. "
+        f"Using {DEFAULTS['flow_bar_position']!r} for this run."
+    )
+    return DEFAULTS["flow_bar_position"]
