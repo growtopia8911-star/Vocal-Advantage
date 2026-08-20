@@ -1464,3 +1464,215 @@ def test_the_player_is_built_from_config():
 def test_the_start_tone_is_off_unless_asked_for():
     # It plays while the microphone is open; on speakers it feeds back in.
     assert va_main._make_player({}).on_start is False
+
+
+# --------------------------------------------------------------------------
+# "Change hotkey" from the tray menu
+# --------------------------------------------------------------------------
+#
+# --set-hotkey cannot be used while the app is running: it installs its own
+# keyboard hook, and the single-instance lock exists to stop two hooks fighting
+# over the keyboard. So the change happens in place.
+#
+# THE PROPERTY THAT MATTERS: the hotkey always comes back. Losing it means
+# losing the app, with no way to recover except quitting from the tray.
+
+
+class _FakeHook:
+    started = []
+
+    def __init__(self, spec=None, on_key=None):
+        self.spec = spec
+        self.stopped = False
+        self.start_error = None
+
+    def start(self):
+        if self.start_error:
+            raise self.start_error
+        type(self).started.append(self.spec)
+
+    def stop(self):
+        self.stopped = True
+
+
+class _Ctl:
+    def __init__(self):
+        self.hotkey = None
+
+    def set_hotkey(self, spec):
+        self.hotkey = spec
+
+
+class _HotkeyModule:
+    """Stands in for hotkey_mac / hotkey_win."""
+
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.HotkeyListener = _FakeHook
+
+    def capture_hotkey(self, *_a, **_k):
+        if self.error:
+            raise self.error
+        return self.result
+
+
+def _changer(tmp_path, module, spec_text="right ctrl"):
+    _FakeHook.started = []
+    original = parse_hotkey(spec_text)
+    controller = _Ctl()
+    indicator = _Indicator()
+    config_path = tmp_path / "config.json"
+    changer = va_main.HotkeyChanger(
+        listener=_FakeHook(original),
+        spec=original,
+        on_key=lambda *_: None,
+        controller=controller,
+        indicator=indicator,
+        config_path=config_path,
+    )
+    return changer, controller, indicator, config_path
+
+
+def _run(changer, module, monkeypatch):
+    monkeypatch.setattr(va_main, "platform_modules", lambda: (module, None))
+    changer.PROMPT_EVERY_S = 0.01
+    changer._change()
+
+
+def test_a_new_hotkey_is_saved_and_swapped_in(tmp_path, monkeypatch):
+    module = _HotkeyModule(result=parse_hotkey("f8"))
+    changer, controller, _, config_path = _changer(tmp_path, module)
+
+    _run(changer, module, monkeypatch)
+
+    assert controller.hotkey == parse_hotkey("f8")
+    assert json.loads(config_path.read_text(encoding="utf-8"))["hotkey"] == "f8"
+
+
+def test_the_saved_hotkey_can_be_read_back_by_the_parser(tmp_path, monkeypatch):
+    # Stored as raw key names, not str(spec)'s display form, or the next launch
+    # cannot parse its own config.
+    module = _HotkeyModule(result=parse_hotkey("right ctrl+f8"))
+    changer, _, _, config_path = _changer(tmp_path, module)
+
+    _run(changer, module, monkeypatch)
+
+    stored = json.loads(config_path.read_text(encoding="utf-8"))["hotkey"]
+    assert parse_hotkey(stored).keys == parse_hotkey("right ctrl+f8").keys
+
+
+def test_the_old_hook_is_stopped_before_capture(tmp_path, monkeypatch):
+    # Both hooks live at once would mean the app starts recording while you
+    # are choosing which key to use.
+    module = _HotkeyModule(result=parse_hotkey("f8"))
+    changer, _, _, _ = _changer(tmp_path, module)
+    original = changer.listener
+
+    _run(changer, module, monkeypatch)
+
+    assert original.stopped
+
+
+def test_a_listener_is_running_again_afterwards(tmp_path, monkeypatch):
+    module = _HotkeyModule(result=parse_hotkey("f8"))
+    changer, _, _, _ = _changer(tmp_path, module)
+
+    _run(changer, module, monkeypatch)
+
+    assert _FakeHook.started == [parse_hotkey("f8")]
+
+
+def test_a_refused_key_restores_the_working_hotkey(tmp_path, monkeypatch, capsys):
+    module = _HotkeyModule(error=HotkeyError("that key cannot be used"))
+    changer, controller, _, _ = _changer(tmp_path, module)
+
+    _run(changer, module, monkeypatch)
+
+    assert _FakeHook.started == [parse_hotkey("right ctrl")]
+    assert controller.hotkey is None, "the controller must not have been changed"
+    assert "unchanged" in capsys.readouterr().err
+
+
+def test_a_timeout_restores_the_working_hotkey(tmp_path, monkeypatch):
+    # Nobody at the keyboard. The app must not be left with no hotkey.
+    module = _HotkeyModule(error=TimeoutError("nobody pressed anything"))
+    changer, _, _, _ = _changer(tmp_path, module)
+
+    _run(changer, module, monkeypatch)
+
+    assert _FakeHook.started == [parse_hotkey("right ctrl")]
+
+
+def test_an_unexpected_crash_in_capture_still_restores_the_hotkey(
+    tmp_path, monkeypatch
+):
+    module = _HotkeyModule(error=RuntimeError("the tap died"))
+    changer, _, _, _ = _changer(tmp_path, module)
+
+    _run(changer, module, monkeypatch)
+
+    assert _FakeHook.started == [parse_hotkey("right ctrl")]
+
+
+def test_a_config_that_cannot_be_saved_keeps_the_old_hotkey(
+    tmp_path, monkeypatch, capsys
+):
+    module = _HotkeyModule(result=parse_hotkey("f8"))
+    changer, controller, _, _ = _changer(tmp_path, module)
+    monkeypatch.setattr(
+        va_main, "save_config",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    _run(changer, module, monkeypatch)
+
+    assert controller.hotkey is None
+    assert _FakeHook.started == [parse_hotkey("right ctrl")]
+    assert "keeping the old one" in capsys.readouterr().err
+
+
+def test_a_hook_that_will_not_restart_says_so_loudly(tmp_path, monkeypatch, capsys):
+    module = _HotkeyModule(result=parse_hotkey("f8"))
+    changer, _, indicator, _ = _changer(tmp_path, module)
+
+    class Broken(_FakeHook):
+        def start(self):
+            raise RuntimeError("the hook is gone")
+
+    module.HotkeyListener = Broken
+    _run(changer, module, monkeypatch)
+
+    captured = capsys.readouterr().err
+    assert "could not be restarted" in captured
+    assert ("flash", "hotkey lost - restart") in indicator.calls
+
+
+def test_the_live_listener_is_the_one_shutdown_will_stop(tmp_path, monkeypatch):
+    # "Change hotkey" replaces the listener object. Stopping the original at
+    # shutdown would leave the live hook installed after the app exits.
+    module = _HotkeyModule(result=parse_hotkey("f8"))
+    changer, _, _, _ = _changer(tmp_path, module)
+    original = changer.listener
+
+    _run(changer, module, monkeypatch)
+
+    assert changer.listener is not original
+
+
+def test_a_second_request_while_waiting_is_ignored(tmp_path, capsys):
+    module = _HotkeyModule(result=parse_hotkey("f8"))
+    changer, _, _, _ = _changer(tmp_path, module)
+    changer._busy.set()
+
+    changer.request()
+
+    assert "Already waiting" in capsys.readouterr().out
+
+
+def test_the_prompt_uses_the_plain_indicator_not_the_sounding_one(tmp_path):
+    # The prompt repeats about once a second while you decide. The sound
+    # wrapper maps every flash to the error tone, so repeating it through that
+    # would beep at you until you pressed something.
+    _, _, indicator, _ = _changer(tmp_path, _HotkeyModule())
+    assert not isinstance(indicator, va_main.SoundingIndicator)

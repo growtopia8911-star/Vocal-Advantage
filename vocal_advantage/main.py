@@ -572,6 +572,129 @@ class RecordingPaster:
         return bool(self._inner.paste_text(text))
 
 
+class HotkeyChanger:
+    """The tray's "Change hotkey" item, without restarting the app.
+
+    `--set-hotkey` cannot be used while the app is running: it installs its own
+    keyboard hook, and the single-instance lock exists precisely to stop two
+    hooks fighting over the keyboard. So the change happens in place -- stop
+    our hook, capture, swap, start a new hook.
+
+    **The property that matters is that the hotkey always comes back.** Every
+    failure path -- a refused key, a timeout, nobody at the keyboard, an
+    exception from the capture -- restarts the listener on the hotkey that was
+    already working. Losing the hotkey means losing the app, with no way to get
+    it back except quitting from the tray.
+
+    Runs on its own thread: `capture_hotkey` blocks for up to thirty seconds,
+    and on macOS that thread must not be the one running the UI.
+    """
+
+    #: Re-shown at this interval while waiting. `flash` times itself out after
+    #: 1.5s, and a prompt that vanished while you were deciding which key to
+    #: press would be worse than no prompt.
+    PROMPT_EVERY_S = 1.2
+
+    def __init__(self, *, listener, spec, on_key, controller, indicator,
+                 config_path: Path) -> None:
+        self._listener = listener
+        self._spec = spec
+        self._on_key = on_key
+        self._controller = controller
+        # The RAW indicator, deliberately, not the one wrapped for sounds:
+        # these are prompts, and the sound wrapper maps every flash to the
+        # error tone. Repeating that once a second while you decide which key
+        # to press would be unbearable.
+        self._indicator = indicator
+        self._config_path = config_path
+        self._busy = threading.Event()
+
+    @property
+    def listener(self):
+        """Whichever listener is live now. Shutdown stops this one."""
+        return self._listener
+
+    def request(self) -> None:
+        """Menu handler. Returns at once; the work is on a worker thread."""
+        if self._busy.is_set():
+            say("Already waiting for a new hotkey.")
+            return
+        self._busy.set()
+        threading.Thread(
+            target=self._run, name="vocal-advantage-set-hotkey", daemon=True
+        ).start()
+
+    def _run(self) -> None:
+        try:
+            self._change()
+        finally:
+            # Whatever happened, the menu item works again.
+            self._busy.clear()
+
+    def _change(self) -> None:
+        hotkey_module, _ = platform_modules()
+        say("Hold the key or combo you want, then release it.")
+
+        stop_prompt = threading.Event()
+        threading.Thread(
+            target=self._keep_prompting, args=(stop_prompt,),
+            name="vocal-advantage-hotkey-prompt", daemon=True,
+        ).start()
+
+        # Our hook has to be down before capture installs its own, or both see
+        # the keypress and the app starts recording while you are choosing.
+        _safe_call("hotkey listener stop", self._listener.stop)
+        try:
+            spec = hotkey_module.capture_hotkey()
+        except Exception as error:  # noqa: BLE001 - HotkeyError, TimeoutError, anything
+            stop_prompt.set()
+            warn("Hotkey unchanged: %s" % error)
+            self._indicator.flash("hotkey unchanged")
+            self._restart(self._spec)
+            return
+        stop_prompt.set()
+
+        if not self._save(spec):
+            self._restart(self._spec)
+            return
+
+        self._spec = spec
+        # While no hook is installed, so no key event can be in flight.
+        self._controller.set_hotkey(spec)
+        self._restart(spec)
+        say("Hotkey is now %s." % spec)
+        self._indicator.flash("hotkey: %s" % spec)
+
+    def _keep_prompting(self, stop: threading.Event) -> None:
+        while not stop.wait(self.PROMPT_EVERY_S):
+            self._indicator.flash("press your new hotkey")
+
+    def _save(self, spec) -> bool:
+        try:
+            cfg = load_config(self._config_path)
+            # The raw key names, not str(spec)'s display form: sorted key names
+            # are deterministic and are exactly what parse_hotkey reads back.
+            cfg["hotkey"] = "+".join(sorted(spec.keys))
+            save_config(cfg, self._config_path)
+            return True
+        except Exception:  # noqa: BLE001
+            warn("Could not save the new hotkey; keeping the old one.")
+            warn(traceback.format_exc())
+            return False
+
+    def _restart(self, spec) -> None:
+        """Get a working hook back. The one thing that must not fail quietly."""
+        hotkey_module, _ = platform_modules()
+        try:
+            self._listener = hotkey_module.HotkeyListener(spec, self._on_key)
+            self._listener.start()
+        except Exception:  # noqa: BLE001
+            warn("The hotkey could not be restarted. Quit from the tray and "
+                 "start the app again.")
+            warn(traceback.format_exc())
+            self._indicator.flash("hotkey lost - restart")
+
+
 def _make_player(cfg: dict) -> Player:
     return Player(
         enabled=bool(cfg.get("sounds", True)),
@@ -649,12 +772,27 @@ def _make_flow_bar(cfg: dict, indicator):
         return None
 
 
-def _make_tray(
-    indicator,
-    on_quit: Callable[[], None],
-    on_toggle_move: Callable[[], None] | None = None,
-    is_movable: Callable[[], bool] | None = None,
-):
+def _menu_items(bar, changer, config_path: Path):
+    """The (title, action) pairs between the status line and Quit.
+
+    A title may be a callable, re-read whenever the menu opens, so an item can
+    say what clicking it will DO rather than what the state currently is. An
+    action of None drops the item entirely -- which is how "Move bar"
+    disappears when there is no bar to move.
+    """
+    toggle_move, is_movable = _move_mode(bar, config_path)
+    return [
+        (
+            (lambda: "Lock bar in place" if is_movable() else "Move bar")
+            if is_movable
+            else "Move bar",
+            toggle_move,
+        ),
+        ("Change hotkey...", changer.request),
+    ]
+
+
+def _make_tray(indicator, on_quit: Callable[[], None], items=()):
     """The tray / menu-bar icon, or None if it refuses to start. Never raises."""
     try:
         if sys.platform == "darwin":
@@ -662,7 +800,7 @@ def _make_tray(
         else:
             from vocal_advantage.tray_win import TrayIcon
 
-        return TrayIcon(indicator, on_quit, on_toggle_move, is_movable)
+        return TrayIcon(indicator, on_quit, items)
     except Exception:  # noqa: BLE001 - as above
         warn("The tray icon could not be created.")
         warn("Dictation and the hotkey are unaffected; press Ctrl+C to quit.")
@@ -834,8 +972,11 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     # UI last: by here the hotkey already works, so anything below failing
     # costs decoration and never dictation.
     bar = _make_flow_bar(cfg, indicator)
-    toggle_move, is_movable = _move_mode(bar, config_path)
-    tray = _make_tray(indicator, lambda: None, toggle_move, is_movable)
+    changer = HotkeyChanger(
+        listener=listener, spec=spec, on_key=on_key, controller=controller,
+        indicator=indicator, config_path=config_path,
+    )
+    tray = _make_tray(indicator, lambda: None, _menu_items(bar, changer, config_path))
 
     shutting_down = threading.Event()
 
@@ -847,7 +988,12 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
         # Quitting mid-drag should not throw the new position away.
         if bar is not None and bar.movable:
             _save_flow_bar_point(bar, config_path)
-        _stop_dictation(listener, recorder, worker, events, stop_event)
+        # changer.listener, not `listener`: "Change hotkey" replaces the
+        # listener object, and stopping the original would leave the live hook
+        # installed after the app exits.
+        _stop_dictation(
+            changer.listener, recorder, worker, events, stop_event
+        )
         if bar is not None:
             _safe_call("flow bar close", bar.close)
         if tray is not None:
@@ -1001,9 +1147,14 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         warn(traceback.format_exc())
 
     bar = _make_flow_bar(cfg, indicator) if app is not None else None
-    toggle_move, is_movable = _move_mode(bar, config_path)
+    changer = HotkeyChanger(
+        listener=listener, spec=spec, on_key=on_key, controller=controller,
+        indicator=indicator, config_path=config_path,
+    )
     tray = (
-        _make_tray(indicator, lambda: None, toggle_move, is_movable)
+        _make_tray(
+            indicator, lambda: None, _menu_items(bar, changer, config_path)
+        )
         if app is not None
         else None
     )
@@ -1018,7 +1169,12 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         # Quitting mid-drag should not throw the new position away.
         if bar is not None and bar.movable:
             _save_flow_bar_point(bar, config_path)
-        _stop_dictation(listener, recorder, worker, events, stop_event)
+        # changer.listener, not `listener`: "Change hotkey" replaces the
+        # listener object, and stopping the original would leave the live hook
+        # installed after the app exits.
+        _stop_dictation(
+            changer.listener, recorder, worker, events, stop_event
+        )
         if bar is not None:
             _safe_call("flow bar close", bar.close)
         if tray is not None:

@@ -29,13 +29,13 @@ except ImportError:  # pragma: no cover - not Windows, or not installed
 class TrayIcon:
     """The tray presence. `run()` blocks, so it is what the main thread does."""
 
-    def __init__(self, indicator, on_quit, on_toggle_move=None, is_movable=None) -> None:
+    def __init__(self, indicator, on_quit, items=()) -> None:
         self._indicator = indicator
         self._on_quit = on_quit
-        #: Optional: without both, the "Move bar" item is left out entirely
-        #: rather than shown doing nothing.
-        self._on_toggle_move = on_toggle_move
-        self._is_movable = is_movable
+        #: (title, action) pairs between the status line and Quit. `title` may
+        #: be a callable, re-read each time the menu opens. A feature whose
+        #: action is None is left out entirely rather than shown doing nothing.
+        self._extra = [(t, a) for t, a in items if a is not None]
         self._icon = None
 
     def _status(self, _item) -> str:
@@ -49,22 +49,21 @@ class TrayIcon:
         except Exception:  # noqa: BLE001 - the menu must still open
             return "Unknown"
 
-    def _move_title(self, _item) -> str:
-        # Says what clicking will DO, not what the state is, so it reads as a
-        # verb -- and re-evaluated on open, like the status line.
-        return "Lock bar in place" if self._is_movable() else "Move bar"
-
-    def _toggle_move(self, _icon=None, _item=None) -> None:
-        self._on_toggle_move()
-
     def _build(self):
         items = [
             # enabled=False makes it a label. A status line that highlights
             # under the pointer looks like something you failed to click.
             pystray.MenuItem(self._status, None, enabled=False),
         ]
-        if self._on_toggle_move is not None and self._is_movable is not None:
-            items.append(pystray.MenuItem(self._move_title, self._toggle_move))
+        for title, action in self._extra:
+            # pystray re-evaluates a callable title each time the menu opens,
+            # which is what lets an item say what clicking it will DO.
+            items.append(
+                pystray.MenuItem(
+                    (lambda _item, t=title: t()) if callable(title) else title,
+                    lambda _icon=None, _item=None, a=action: a(),
+                )
+            )
         items += [
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit Vocal Advantage", self._quit),

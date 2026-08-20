@@ -81,17 +81,22 @@ class _TrayTarget(NSObject):
             return None
         self._indicator = indicator
         self._on_quit = on_quit
-        self._on_toggle_move = None
-        self._is_movable = None
         self._status_item = None
-        self._move_item = None
+        #: Parallel lists, indexed by the menu item's tag. Cocoa gives every
+        #: item one selector, so the tag is how one target serves many items --
+        #: which beats inventing a selector per feature.
+        self._actions = []
+        self._titles = []
+        self._items = []
         return self
 
     def setStatusMenuItem_(self, item) -> None:
         self._status_item = item
 
-    def setMoveItem_(self, item) -> None:
-        self._move_item = item
+    def addAction_title_item_(self, action, title, item) -> None:
+        self._actions.append(action)
+        self._titles.append(title)
+        self._items.append(item)
 
     def menuNeedsUpdate_(self, _menu) -> None:
         """Refresh the status line as the menu opens.
@@ -106,16 +111,19 @@ class _TrayTarget(NSObject):
             except Exception:  # noqa: BLE001 - a menu must still open
                 self._status_item.setTitle_("Unknown")
 
-        if self._move_item is not None and self._is_movable is not None:
-            # The title says what clicking will DO, not what the state is --
-            # "Lock bar" while unlocked, so the menu reads as a verb.
-            self._move_item.setTitle_(
-                "Lock bar in place" if self._is_movable() else "Move bar"
-            )
+        # Titles that are callables are re-read here, so an item can say what
+        # clicking it will DO rather than what the state currently is.
+        for title, item in zip(self._titles, self._items):
+            if callable(title):
+                try:
+                    item.setTitle_(title())
+                except Exception:  # noqa: BLE001 - a menu must still open
+                    pass
 
-    def toggleMove_(self, _sender) -> None:
-        if self._on_toggle_move is not None:
-            self._on_toggle_move()
+    def invoke_(self, sender) -> None:
+        index = int(sender.tag())
+        if 0 <= index < len(self._actions):
+            self._actions[index]()
 
     def quit_(self, _sender) -> None:
         self._on_quit()
@@ -124,13 +132,13 @@ class _TrayTarget(NSObject):
 class TrayIcon:
     """The menu-bar presence. Main thread only, like everything in AppKit."""
 
-    def __init__(self, indicator, on_quit, on_toggle_move=None, is_movable=None) -> None:
+    def __init__(self, indicator, on_quit, items=()) -> None:
         self._indicator = indicator
         self._on_quit = on_quit
-        #: Optional: without both of these the "Move bar" item is left out
-        #: entirely rather than shown doing nothing.
-        self._on_toggle_move = on_toggle_move
-        self._is_movable = is_movable
+        #: (title, action) pairs between the status line and Quit. `title` may
+        #: be a callable, re-read each time the menu opens. A feature whose
+        #: action is None is left out entirely rather than shown doing nothing.
+        self._extra = [(t, a) for t, a in items if a is not None]
         self._item = None
         self._target = None
 
@@ -157,15 +165,16 @@ class TrayIcon:
         menu.addItem_(status)
         self._target.setStatusMenuItem_(status)
 
-        if self._on_toggle_move is not None and self._is_movable is not None:
-            self._target._on_toggle_move = self._on_toggle_move
-            self._target._is_movable = self._is_movable
-            move_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                "Move bar", "toggleMove:", ""
+        for index, (title, action) in enumerate(self._extra):
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                title() if callable(title) else title, "invoke:", ""
             )
-            move_item.setTarget_(self._target)
-            menu.addItem_(move_item)
-            self._target.setMoveItem_(move_item)
+            item.setTarget_(self._target)
+            # The tag is the index into the target's action list: one selector
+            # serving every item, rather than a selector invented per feature.
+            item.setTag_(index)
+            menu.addItem_(item)
+            self._target.addAction_title_item_(action, title, item)
 
         menu.addItem_(NSMenuItem.separatorItem())
 
