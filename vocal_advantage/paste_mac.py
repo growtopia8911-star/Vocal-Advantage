@@ -26,6 +26,7 @@ import time
 # Re-exported so callers and the key hook share one flag and one set of delays.
 from vocal_advantage.paste_core import (  # noqa: F401
     CLIPBOARD_ATTEMPTS,
+    type_with,
     CLIPBOARD_RETRY_S,
     CLIPBOARD_SETTLE_S,
     KEY_INTERVAL_S,
@@ -54,6 +55,11 @@ KEYCODE_RIGHT_OPTION = 61   # the default hotkey
 KEYCODE_CONTROL = 59
 KEYCODE_RIGHT_CONTROL = 62
 KEYCODE_V = 9
+
+# How many characters ride on one synthetic event. Kept modest deliberately:
+# very long unicode payloads are handled inconsistently by some apps, and the
+# cost of another event is negligible.
+TYPE_CHUNK_CHARS = 20
 
 # The stamp that tells our own key hook "this was us, ignore it". Any value
 # works; it just has to be one nothing else would plausibly write.
@@ -167,6 +173,29 @@ class MacBackend:
     def set_clipboard(self, text: str) -> None:
         _set_clipboard(text)
 
+    def send_text(self, text: str) -> bool:
+        """Type the text in directly, bypassing the keyboard layout entirely.
+
+        The keycode is irrelevant once a unicode string is attached, so 0 is
+        used by convention. Flags are cleared explicitly: a stale Command flag
+        would turn the whole transcript into a run of keyboard shortcuts.
+        """
+        if Quartz is None:  # pragma: no cover - not macOS
+            return False
+        for start in range(0, len(text), TYPE_CHUNK_CHARS):
+            chunk = text[start : start + TYPE_CHUNK_CHARS]
+            for down in (True, False):
+                event = Quartz.CGEventCreateKeyboardEvent(None, 0, down)
+                if event is None:
+                    return False
+                Quartz.CGEventKeyboardSetUnicodeString(event, len(chunk), chunk)
+                Quartz.CGEventSetFlags(event, 0)
+                Quartz.CGEventSetIntegerValueField(
+                    event, Quartz.kCGEventSourceUserData, INJECTED_MARKER
+                )
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+        return True
+
     def send_key(self, keycode: int, down: bool) -> int:
         """Post one key event, stamped as ours. Returns 1 if it was posted.
 
@@ -205,7 +234,30 @@ def _default_backend() -> PasteBackend:
 
 
 def paste_text(text: str, *, backend: PasteBackend | None = None) -> bool:
-    """Put text on the pasteboard and paste it into the focused app."""
+    """Deliver the transcript to the focused app, without using the clipboard.
+
+    macOS lets a synthetic key event carry the literal text
+    (CGEventKeyboardSetUnicodeString), which sidesteps both reasons Windows
+    needs the clipboard -- dropped characters and keyboard-layout translation --
+    and leaves whatever the user had copied exactly where it was.
+
+    For ordinary dictation this is also the quicker route: the clipboard path
+    pays a fixed ~0.22s in settle and hold delays regardless of length, while
+    this pays only per chunk of 20 characters. A long passage would eventually
+    overtake it; see paste_via_clipboard, kept for exactly that case.
+    """
+    if backend is None:
+        backend = _default_backend()
+    return type_with(text, backend)
+
+
+def paste_via_clipboard(text: str, *, backend: PasteBackend | None = None) -> bool:
+    """The clipboard + Cmd+V route. Replaces the user's clipboard.
+
+    Kept because it costs the same no matter how much was said, so it is the
+    better choice for a long dictation, and because it is the route Windows
+    uses -- one implementation, tested on both.
+    """
     if backend is None:
         backend = _default_backend()
     return paste_with(text, backend, CMD_V_SEQUENCE)

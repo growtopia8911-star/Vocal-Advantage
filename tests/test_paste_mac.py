@@ -96,11 +96,13 @@ class FakeBackend:
         return self.send_result
 
 
-def test_paste_sequence_order_and_timing_matches_windows():
-    """Same delays as Windows, because paste_core owns them for both."""
+def test_the_clipboard_route_still_matches_windows_step_for_step():
+    """Kept as the fallback for long dictations, where one atomic paste beats
+    typing hundreds of characters. Same delays as Windows: paste_core owns
+    them for both."""
     fake = FakeBackend()
 
-    assert paste_mac.paste_text("hello world", backend=fake) is True
+    assert paste_mac.paste_via_clipboard("hello world", backend=fake) is True
 
     assert fake.log == [
         ("modifiers_down", False, 0.0),
@@ -122,16 +124,16 @@ def test_it_waits_for_a_held_modifier_before_pasting():
     # late would otherwise turn Cmd+V into Option+Cmd+V.
     fake = FakeBackend(modifier_polls_held=2)
 
-    assert paste_mac.paste_text("hello", backend=fake) is True
+    assert paste_mac.paste_via_clipboard("hello", backend=fake) is True
 
     assert [e[0] for e in fake.log[:5]] == [
         "modifiers_down", "sleep", "modifiers_down", "sleep", "modifiers_down",
     ]
 
 
-def test_the_gate_is_up_throughout_and_cleared_at_the_end():
+def test_the_gate_is_up_throughout_the_clipboard_route_too():
     fake = FakeBackend()
-    paste_mac.paste_text("hello", backend=fake)
+    paste_mac.paste_via_clipboard("hello", backend=fake)
     assert fake.flag_seen and all(fake.flag_seen)
     assert not paste_mac.injection_active.is_set()
 
@@ -144,12 +146,22 @@ def test_blank_text_is_never_pasted(text):
 
 
 def test_the_gate_is_cleared_even_if_the_backend_explodes():
-    class Exploding(FakeBackend):
+    """A stuck gate would deafen the key hook permanently -- the hotkey would
+    stop working until restart. Both routes must survive it."""
+    class ExplodingTyper(TypingFakeBackend):
+        def send_text(self, text):
+            raise RuntimeError("boom")
+
+    class ExplodingPaster(FakeBackend):
         def send_key(self, vk, down):
             raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError):
-        paste_mac.paste_text("hello", backend=Exploding())
+        paste_mac.paste_text("hello", backend=ExplodingTyper())
+    assert not paste_mac.injection_active.is_set()
+
+    with pytest.raises(RuntimeError):
+        paste_mac.paste_via_clipboard("hello", backend=ExplodingPaster())
     assert not paste_mac.injection_active.is_set()
 
 
@@ -164,6 +176,7 @@ class FakeEvent:
         self.down = down
         self.flags = 0
         self.fields = {}
+        self.unicode = None
 
 
 class FakeQuartz:
@@ -190,6 +203,9 @@ class FakeQuartz:
 
     def CGEventGetIntegerValueField(self, event, field):
         return event.fields.get(field, 0)
+
+    def CGEventKeyboardSetUnicodeString(self, event, length, string):
+        event.unicode = string
 
     def CGEventPost(self, tap, event):
         self.posted.append(event)
@@ -289,3 +305,92 @@ def test_a_refused_clipboard_write_raises_oserror_so_it_gets_retried(monkeypatch
     monkeypatch.setattr(paste_mac, "_general_pasteboard", lambda: Refusing())
     with pytest.raises(OSError):
         paste_mac._set_clipboard("hi")
+
+
+# ---------------------------------------------------------------------------
+# Typing the text directly, which never touches the clipboard at all
+# ---------------------------------------------------------------------------
+
+
+class TypingFakeBackend(FakeBackend):
+    """Adds the one method the direct-typing route needs."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.typed = []
+
+    def send_text(self, text):
+        self._record("typed", text)
+        self.typed.append(text)
+        return True
+
+
+def test_typing_never_touches_the_clipboard():
+    """The whole point. Your clipboard is yours; a dictation should not
+    silently replace whatever you had copied."""
+    fake = TypingFakeBackend()
+
+    assert paste_mac.paste_text("hello world", backend=fake) is True
+
+    assert fake.clipboard_text is None
+    assert [e[0] for e in fake.log] == ["modifiers_down", "typed", "sleep"]
+    assert fake.typed == ["hello world"]
+
+
+def test_typing_still_waits_for_a_held_modifier():
+    """Critical here, not merely tidy: the hotkey IS Command. Typing while it
+    is still physically down turns every character into a keyboard shortcut."""
+    fake = TypingFakeBackend(modifier_polls_held=2)
+
+    assert paste_mac.paste_text("hello", backend=fake) is True
+
+    assert [e[0] for e in fake.log[:5]] == [
+        "modifiers_down", "sleep", "modifiers_down", "sleep", "modifiers_down",
+    ]
+
+
+def test_the_gate_is_up_while_typing_and_cleared_after():
+    fake = TypingFakeBackend()
+    paste_mac.paste_text("hello", backend=fake)
+    assert fake.flag_seen and all(fake.flag_seen)
+    assert not paste_mac.injection_active.is_set()
+
+
+@pytest.mark.parametrize("text", ["", "   ", "\n"])
+def test_blank_text_is_never_typed(text):
+    fake = TypingFakeBackend()
+    assert paste_mac.paste_text(text, backend=fake) is False
+    assert fake.log == []
+
+
+def test_short_text_goes_in_a_single_event(fake_quartz):
+    paste_mac.MacBackend().send_text("hello")
+    assert len(fake_quartz.posted) == 2  # one key-down, one key-up
+    assert fake_quartz.posted[0].unicode == "hello"
+
+
+def test_long_text_is_split_into_chunks(fake_quartz):
+    text = "x" * (paste_mac.TYPE_CHUNK_CHARS * 3 + 5)
+    paste_mac.MacBackend().send_text(text)
+
+    chunks = [e.unicode for e in fake_quartz.posted if e.down]
+    assert "".join(chunks) == text, "every character must arrive, in order"
+    assert all(len(c) <= paste_mac.TYPE_CHUNK_CHARS for c in chunks)
+
+
+def test_typed_events_are_stamped_so_our_own_hook_skips_them(fake_quartz):
+    paste_mac.MacBackend().send_text("hi")
+    for event in fake_quartz.posted:
+        assert event.fields[FakeQuartz.kCGEventSourceUserData] == paste_mac.INJECTED_MARKER
+
+
+def test_typed_events_carry_no_modifier_flags(fake_quartz):
+    """A stale Command flag would turn the text into a run of shortcuts."""
+    paste_mac.MacBackend().send_text("hi")
+    assert all(event.flags == 0 for event in fake_quartz.posted)
+
+
+def test_unicode_survives_being_typed(fake_quartz):
+    paste_mac.MacBackend().send_text("naive cafe -- ni hao")
+    typed = "".join(e.unicode for e in fake_quartz.posted if e.down)
+    assert typed == "naive cafe -- ni hao"

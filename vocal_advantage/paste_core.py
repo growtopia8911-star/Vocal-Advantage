@@ -132,3 +132,34 @@ def paste_with(
         # Always, even on an unexpected exception: a stuck flag would make the
         # hotkey stop working entirely until restart.
         injection_active.clear()
+
+
+def type_with(text: str, backend) -> bool:
+    """Type the text straight in, never touching the clipboard.
+
+    The clipboard route exists because Windows makes synthetic typing
+    unreliable: characters get dropped, and a fake keypress is interpreted
+    through the user's keyboard layout, so the same key yields different
+    characters on different layouts. Neither applies when the platform lets you
+    attach the literal text to the event, which macOS does. Then typing is both
+    faster for ordinary dictation and leaves the user's clipboard alone -- and
+    a clipboard silently replaced by whatever you just said is a genuinely
+    unpleasant surprise.
+
+    ``backend`` must additionally provide ``send_text(str) -> bool``.
+    """
+    if not text.strip():
+        return False
+
+    injection_active.set()
+    try:
+        # Not optional, and more important here than on the clipboard route:
+        # the hotkey is usually a modifier, and typing while it is still
+        # physically held turns every character into a keyboard shortcut.
+        wait_for_modifier_release(backend)
+        sent = backend.send_text(text)
+        # Hold the guard a moment so the key hook drops our own events.
+        backend.sleep(POST_PASTE_S)
+        return bool(sent)
+    finally:
+        injection_active.clear()
