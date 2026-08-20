@@ -38,12 +38,12 @@ MUTEX_NAME = r"Local\VocalAdvantageSingleInstance"
 ERROR_ALREADY_EXISTS = 183
 
 TICK_INTERVAL_S = 1.0  # how often the controller's 300s watchdog gets a chance to fire
-# Live dictation transcribes the audio so far on every tick, so the tick has to
-# be quick enough to feel live and slow enough not to spend the whole CPU
-# re-transcribing. A word needs two agreeing passes before it is typed, so
-# this interval is HALF the felt lag, not all of it: at 0.25s a word appears
-# roughly 0.5s after it is spoken. A pass on `tiny` costs ~0.2s.
-LIVE_TICK_S = 0.25
+# The live loop's wake-up interval, NOT the transcription cadence -- that is
+# self-paced inside LiveDictation from the measured cost of each pass, so fast
+# hardware transcribes as often as it can afford and slow hardware backs off.
+# This only bounds how promptly a newly-earned pass starts, and a wake-up on an
+# un-earned tick costs one clock comparison.
+LIVE_TICK_S = 0.1
 UI_PUMP_MS = 50        # how often tkinter drains the indicator's queue
 HEARTBEAT_MS = 200     # keeps Ctrl+C responsive and notices a dead controller thread
 
@@ -140,16 +140,37 @@ class LiveDictation:
     #: Below this there is not enough audio for a pass to tell you anything,
     #: and running the model on it is pure waste.
     MIN_AUDIO_S = 0.8
+    #: The floor between passes. Not a pace-setter -- just enough to stop a
+    #: very fast machine from spinning on identical audio.
+    MIN_GAP_S = 0.05
+    #: Past this much audio the live preview stops. Every pass re-transcribes
+    #: from the start, so cost grows with length -- and a pass in flight delays
+    #: the key-release event queued behind it. The final transcript on release
+    #: still delivers everything; only the preview goes quiet.
+    MAX_PARTIAL_S = 25.0
 
-    def __init__(self, *, recorder, transcriber, type_partial, type_final) -> None:
+    def __init__(
+        self, *, recorder, transcriber, type_partial, type_final,
+        clock=time.monotonic,
+    ) -> None:
         self._recorder = recorder
         self._transcriber = transcriber
         self._type_partial = type_partial
         self._type_final = type_final
+        self._clock = clock
         self._session = StreamingTranscript()
         self._last_samples = 0
+        # Self-pacing. There is no good constant here: a pass costs ~0.05s on a
+        # GPU and seconds on a weak CPU, so the cadence is derived from the
+        # measured cost of the previous pass -- next pass earned one
+        # pass-duration after the last one finished (at most half the machine's
+        # time spent transcribing). Fast hardware ticks fast, slow hardware
+        # backs off, and no tuning survives being wrong on somebody's machine.
+        self._next_pass_at = 0.0
 
     def on_partial(self) -> None:
+        if self._clock() < self._next_pass_at:
+            return
         audio = self._recorder.snapshot()
         # The buffer shrinking means the recorder started a fresh recording --
         # a previous one was cancelled without ever reaching paste_text.
@@ -159,10 +180,14 @@ class LiveDictation:
 
         if audio.size < int(self.MIN_AUDIO_S * self.SAMPLE_RATE):
             return
-        started = time.monotonic()
-        fresh = self._session.commit(self._transcriber.transcribe(audio))
+        if audio.size > int(self.MAX_PARTIAL_S * self.SAMPLE_RATE):
+            return
+        started = self._clock()
+        text = self._transcriber.transcribe(audio)
+        took = self._clock() - started
+        self._next_pass_at = self._clock() + max(took, self.MIN_GAP_S)
+        fresh = self._session.commit(text)
         if fresh:
-            took = time.monotonic() - started
             print(
                 f"  [live +{audio.size / self.SAMPLE_RATE:.1f}s in {took:.2f}s]"
                 f" {fresh.strip()!r}",
@@ -175,6 +200,7 @@ class LiveDictation:
         remaining = self._session.finish(text)
         self._session.reset()
         self._last_samples = 0
+        self._next_pass_at = 0.0
         if not remaining:
             # Everything was already typed live. That is a success; reporting
             # failure would flash "could not paste" at a dictation that worked.

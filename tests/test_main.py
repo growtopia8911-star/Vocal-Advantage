@@ -664,32 +664,52 @@ class _FakeRec:
         self.buffer = np.zeros(int(16000 * seconds), dtype=np.float32)
 
 
+class _LiveClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
 class _ScriptedTranscriber:
-    def __init__(self, answers):
+    """Returns canned answers; `pass_time` charges the fake clock per pass,
+    which is how a slow or fast device is simulated."""
+
+    def __init__(self, answers, clock=None, pass_time=0.0):
         self.answers = list(answers)
         self.calls = 0
+        self.clock = clock
+        self.pass_time = pass_time
 
     def transcribe(self, audio):
         self.calls += 1
+        if self.clock is not None:
+            self.clock.advance(self.pass_time)
         return self.answers.pop(0) if self.answers else ""
 
 
-def _live(answers):
+def _live(answers, pass_time=0.0):
     rec = _FakeRec()
-    tr = _ScriptedTranscriber(answers)
+    clk = _LiveClock()
+    tr = _ScriptedTranscriber(answers, clock=clk, pass_time=pass_time)
     typed, final = [], []
     live = va_main.LiveDictation(
         recorder=rec,
         transcriber=tr,
         type_partial=lambda t: typed.append(t) or True,
         type_final=lambda t: final.append(t) or True,
+        clock=clk,
     )
-    return live, rec, tr, typed, final
+    return live, rec, tr, typed, final, clk
 
 
 def test_a_partial_pass_is_skipped_until_there_is_enough_audio():
     """Transcribing a fifth of a second wastes time and tells you nothing."""
-    live, rec, tr, typed, _ = _live(["hello"])
+    live, rec, tr, typed, _, clk = _live(["hello"])
     rec.say(0.2)
     live.on_partial()
     assert tr.calls == 0
@@ -697,18 +717,20 @@ def test_a_partial_pass_is_skipped_until_there_is_enough_audio():
 
 
 def test_words_are_typed_once_two_passes_agree():
-    live, rec, tr, typed, _ = _live(["hello there", "hello there"])
+    live, rec, tr, typed, _, clk = _live(["hello there", "hello there"])
     rec.say(2.0)
     live.on_partial()
     assert typed == [], "one pass proves nothing"
+    clk.advance(1.0)
     live.on_partial()
     assert typed == ["hello there"]
 
 
 def test_the_final_transcript_types_only_what_is_still_owed():
-    live, rec, tr, typed, final = _live(["one two", "one two"])
+    live, rec, tr, typed, final, clk = _live(["one two", "one two"])
     rec.say(2.0)
     live.on_partial()
+    clk.advance(1.0)
     live.on_partial()
     assert typed == ["one two"]
 
@@ -717,7 +739,7 @@ def test_the_final_transcript_types_only_what_is_still_owed():
 
 
 def test_a_dictation_with_no_partials_types_the_whole_thing():
-    live, rec, tr, typed, final = _live([])
+    live, rec, tr, typed, final, clk = _live([])
     assert live.paste_text("hello world") is True
     assert final == ["hello world"]
 
@@ -725,9 +747,10 @@ def test_a_dictation_with_no_partials_types_the_whole_thing():
 def test_it_reports_success_when_the_partials_already_typed_everything():
     """Nothing left to type is a success, not a failed paste -- the controller
     would otherwise flash 'could not paste' at a dictation that worked."""
-    live, rec, tr, typed, final = _live(["all done", "all done"])
+    live, rec, tr, typed, final, clk = _live(["all done", "all done"])
     rec.say(2.0)
     live.on_partial()
+    clk.advance(1.0)
     live.on_partial()
 
     assert live.paste_text("all done") is True
@@ -735,15 +758,18 @@ def test_it_reports_success_when_the_partials_already_typed_everything():
 
 
 def test_each_dictation_starts_clean():
-    live, rec, tr, typed, final = _live(["one", "one", "two", "two"])
+    live, rec, tr, typed, final, clk = _live(["one", "one", "two", "two"])
     rec.say(2.0)
     live.on_partial()
+    clk.advance(1.0)
     live.on_partial()
     live.paste_text("one")
 
     rec.buffer = np.zeros(0, dtype=np.float32)   # the recorder starts over
     rec.say(2.0)
+    clk.advance(1.0)
     live.on_partial()
+    clk.advance(1.0)
     live.on_partial()
     assert typed == ["one", "two"], "the second dictation must not repeat the first"
 
@@ -751,10 +777,77 @@ def test_each_dictation_starts_clean():
 def test_live_dictation_reports_each_group_of_words_it_types(capsys):
     """Without this the live half is invisible in the log, and 'it feels slow'
     cannot be told apart from 'it never fired'."""
-    live, rec, tr, typed, _ = _live(["hello there", "hello there"])
+    live, rec, tr, typed, _, clk = _live(["hello there", "hello there"])
     rec.say(2.0)
     live.on_partial()
+    clk.advance(1.0)
     live.on_partial()
 
     out = capsys.readouterr().out
     assert "hello there" in out
+
+
+# --------------------------------------------------------------------------
+# Self-pacing: the live cadence adapts to whatever hardware this is
+# --------------------------------------------------------------------------
+
+
+def test_a_pass_is_not_rerun_before_the_machine_has_earned_it():
+    """The loop ticks fast on purpose; LiveDictation itself decides when a new
+    pass is affordable. Two ticks with no time passed = one transcription."""
+    live, rec, tr, typed, _, clk = _live(["hello", "hello"], pass_time=0.2)
+    rec.say(2.0)
+    live.on_partial()
+    assert tr.calls == 1
+    live.on_partial()          # the clock has only moved by the pass itself
+    assert tr.calls == 1, "a second pass this soon is pure waste"
+
+
+def test_a_slow_device_backs_off_instead_of_choking():
+    """The gap between passes tracks the cost of the last one, so a machine
+    where a pass takes 2s spends at most half its time transcribing instead of
+    queueing up work it can never finish."""
+    live, rec, tr, typed, _, clk = _live(["a", "a", "a"], pass_time=2.0)
+    rec.say(4.0)
+    live.on_partial()
+    assert tr.calls == 1
+    clk.advance(1.0)           # 1s later: a 2s pass has not been earned yet
+    live.on_partial()
+    assert tr.calls == 1
+    clk.advance(1.5)           # 2.5s after the pass ended: now it has
+    live.on_partial()
+    assert tr.calls == 2
+
+
+def test_a_fast_device_is_only_held_to_a_tiny_floor():
+    live, rec, tr, typed, _, clk = _live(["a", "a", "a"], pass_time=0.01)
+    rec.say(2.0)
+    live.on_partial()
+    clk.advance(va_main.LiveDictation.MIN_GAP_S + 0.001)
+    live.on_partial()
+    assert tr.calls == 2, "fast hardware should be allowed to run fast"
+
+
+def test_very_long_dictations_stop_doing_live_passes():
+    """Each pass re-transcribes from the start, so cost grows with length --
+    and a pass in flight delays the key-release sitting behind it in the
+    queue. Past the cap the preview stops; the final transcript on release
+    still delivers everything."""
+    live, rec, tr, typed, final, clk = _live(["long text"])
+    rec.say(va_main.LiveDictation.MAX_PARTIAL_S + 5.0)
+    live.on_partial()
+    assert tr.calls == 0
+    assert live.paste_text("the whole long thing") is True
+    assert final == ["the whole long thing"]
+
+
+def test_pacing_resets_between_dictations():
+    live, rec, tr, typed, final, clk = _live(["a", "a"], pass_time=5.0)
+    rec.say(2.0)
+    live.on_partial()          # expensive pass; next one owed far in the future
+    live.paste_text("a")
+
+    rec.buffer = np.zeros(0, dtype=np.float32)
+    rec.say(2.0)
+    live.on_partial()          # a fresh dictation must not inherit that debt
+    assert tr.calls == 2
