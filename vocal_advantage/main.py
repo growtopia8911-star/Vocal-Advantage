@@ -40,8 +40,10 @@ ERROR_ALREADY_EXISTS = 183
 TICK_INTERVAL_S = 1.0  # how often the controller's 300s watchdog gets a chance to fire
 # Live dictation transcribes the audio so far on every tick, so the tick has to
 # be quick enough to feel live and slow enough not to spend the whole CPU
-# re-transcribing. At 0.5s a pass on `tiny` costs ~0.2s -- comfortable.
-LIVE_TICK_S = 0.5
+# re-transcribing. A word needs two agreeing passes before it is typed, so
+# this interval is HALF the felt lag, not all of it: at 0.25s a word appears
+# roughly 0.5s after it is spoken. A pass on `tiny` costs ~0.2s.
+LIVE_TICK_S = 0.25
 UI_PUMP_MS = 50        # how often tkinter drains the indicator's queue
 HEARTBEAT_MS = 200     # keeps Ctrl+C responsive and notices a dead controller thread
 
@@ -157,8 +159,15 @@ class LiveDictation:
 
         if audio.size < int(self.MIN_AUDIO_S * self.SAMPLE_RATE):
             return
+        started = time.monotonic()
         fresh = self._session.commit(self._transcriber.transcribe(audio))
         if fresh:
+            took = time.monotonic() - started
+            print(
+                f"  [live +{audio.size / self.SAMPLE_RATE:.1f}s in {took:.2f}s]"
+                f" {fresh.strip()!r}",
+                flush=True,
+            )
             self._type_partial(fresh)
 
     def paste_text(self, text: str) -> bool:

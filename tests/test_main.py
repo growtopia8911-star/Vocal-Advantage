@@ -746,3 +746,15 @@ def test_each_dictation_starts_clean():
     live.on_partial()
     live.on_partial()
     assert typed == ["one", "two"], "the second dictation must not repeat the first"
+
+
+def test_live_dictation_reports_each_group_of_words_it_types(capsys):
+    """Without this the live half is invisible in the log, and 'it feels slow'
+    cannot be told apart from 'it never fired'."""
+    live, rec, tr, typed, _ = _live(["hello there", "hello there"])
+    rec.say(2.0)
+    live.on_partial()
+    live.on_partial()
+
+    out = capsys.readouterr().out
+    assert "hello there" in out
