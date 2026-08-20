@@ -66,13 +66,96 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def acquire_single_instance_lock(name: str = MUTEX_NAME) -> int | None:
-    """Return a mutex handle, or None if another copy of the app already holds it.
+def platform_modules():
+    """The (hotkey, paste) pair for this machine.
 
-    CreateMutexW still returns a valid handle when the name is taken; the way you
-    tell is GetLastError() == ERROR_ALREADY_EXISTS. The caller must keep the
-    returned handle alive for as long as it wants the lock.
+    The only place in the project that chooses a platform. Everything else --
+    the recorder, the transcriber, the controller, the config -- is shared, and
+    both pairs satisfy the same two contracts: HotkeyListener + capture_hotkey,
+    and paste_text.
     """
+    if sys.platform == "darwin":
+        from vocal_advantage import hotkey_mac, paste_mac
+
+        return hotkey_mac, paste_mac
+    from vocal_advantage import hotkey_win, paste_win
+
+    return hotkey_win, paste_win
+
+
+class ConsoleIndicator:
+    """Stands in for the pill on platforms that have no overlay yet.
+
+    Answers to exactly the four methods the controller calls, so controller.py
+    needs no knowledge that the pill is missing. It prints instead of drawing,
+    which is not as good as an overlay but is considerably better than no
+    feedback at all while you are learning what the app is doing.
+
+    Nothing here may raise: an exception from an indicator would surface as a
+    failed dictation.
+    """
+
+    def _say(self, message: str) -> None:
+        try:
+            print(message, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def show_recording(self) -> None:
+        self._say("  [listening]")
+
+    def show_processing(self) -> None:
+        self._say("  [transcribing]")
+
+    def hide(self) -> None:
+        pass
+
+    def flash(self, message: str) -> None:
+        self._say(f"  [{message}]")
+
+
+def release_single_instance_lock(handle) -> None:
+    """Give the lock back. Safe to call with whatever acquire returned."""
+    if handle is None:
+        return
+    if sys.platform == "win32":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        kernel32.CloseHandle.restype = ctypes.c_int
+        kernel32.CloseHandle(handle)
+        return
+    import fcntl
+
+    try:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def acquire_single_instance_lock(name: str = MUTEX_NAME):
+    """Take the app-wide lock, or return None if another copy already holds it.
+
+    Two instances would both hook the keyboard and both paste, so every
+    dictation would land twice.
+
+    Windows uses a named mutex; POSIX uses an exclusive flock on a file in the
+    temp directory, which the OS drops automatically if the process dies -- so a
+    crash never leaves the app unable to start. The return value is opaque and
+    differs by platform; hand it to release_single_instance_lock.
+    """
+    if sys.platform != "win32":
+        import fcntl
+        import tempfile
+
+        safe = "".join(c for c in name if c.isalnum() or c in "-_.") or "lock"
+        handle = open(Path(tempfile.gettempdir()) / f"{safe}.lock", "w")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            return None
+        return handle
+
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
     kernel32.CreateMutexW.restype = ctypes.c_void_p
@@ -196,7 +279,7 @@ def run_set_hotkey(
     return 1
 
 
-def run_app(config_path: Path = CONFIG_PATH) -> int:
+def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     """Build the object graph, start the threads, and hand the main thread to tk."""
     # These imports are function-local on purpose. tkinter, sounddevice and the
     # keyboard hook are all real hardware/OS bindings; keeping them out of module
@@ -355,8 +438,104 @@ def main(argv: list[str] | None = None) -> int:
     if args.set_hotkey:
         # --set-hotkey installs its own keyboard hook, so it must not run
         # alongside the app; holding the same mutex is what prevents that.
-        from vocal_advantage.hotkey_win import capture_hotkey
+        hotkey_module, _ = platform_modules()
 
-        return run_set_hotkey(capture_hotkey, CONFIG_PATH)
+        return run_set_hotkey(hotkey_module.capture_hotkey, CONFIG_PATH)
 
     return run_app(CONFIG_PATH)
+
+
+def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
+    """The macOS launcher. No tkinter, no pill, no CUDA.
+
+    Deliberately does not build a Tk root: with no overlay there is nothing to
+    draw, and creating one would put a Python rocket in the Dock and steal focus
+    at launch -- the exact thing the Windows pill goes to such lengths to avoid.
+
+    The event tap needs a CFRunLoop, but HotkeyListener owns one on its own
+    thread, so the main thread here just waits.
+    """
+    from vocal_advantage import paste_mac
+    from vocal_advantage.hotkey_mac import HotkeyListener, HotkeyPermissionError
+    from vocal_advantage.recorder import Recorder
+
+    cfg = load_config(config_path)
+    spec = parse_hotkey(cfg["hotkey"])
+    print("Hotkey: %s" % spec)
+
+    indicator = ConsoleIndicator()
+
+    print("Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"]))
+    print("(First run only: this downloads about 1.6 GB to your user cache.)")
+    transcriber_cls = import_transcriber_class()
+    transcriber = transcriber_cls(
+        model_name=cfg["model"],
+        device=cfg["device"],
+        language=cfg["language"],
+        min_duration_s=float(cfg["min_duration_s"]),
+    )
+    transcriber.warm_up()
+    print("Model ready.")
+
+    recorder = Recorder()
+    controller = DictationController(
+        hotkey=spec,
+        recorder=recorder,
+        transcriber=transcriber,
+        paster=paste_mac,
+        indicator=indicator,
+        min_duration_s=float(cfg["min_duration_s"]),
+        max_duration_s=float(cfg["max_duration_s"]),
+    )
+
+    events: "queue.Queue" = queue.Queue()
+    stop_event = threading.Event()
+    worker = threading.Thread(
+        target=controller_loop,
+        args=(controller, events, stop_event),
+        name="vocal-advantage-controller",
+        daemon=True,
+    )
+    worker.start()
+
+    def on_key(key_name: str, is_down: bool) -> None:
+        # Runs on the tap's thread. Enqueue and nothing else: real work here
+        # would stall the event tap and macOS would eventually disable it.
+        events.put((key_name, is_down))
+
+    listener = HotkeyListener(spec, on_key)
+    try:
+        listener.start()
+    except HotkeyPermissionError as error:
+        print("", file=sys.stderr)
+        print(error, file=sys.stderr)
+        stop_event.set()
+        events.put(None)
+        worker.join(timeout=2.0)
+        return 1
+
+    print("Ready. Hold %s and speak. Press Ctrl+C to quit." % spec)
+    try:
+        while worker.is_alive():
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        print("")
+    finally:
+        print("Shutting down ...")
+        _safe_call("hotkey listener stop", listener.stop)
+        stop_event.set()
+        events.put(None)
+        worker.join(timeout=5.0)
+        try:
+            if recorder.is_recording:
+                recorder.stop()  # close the stream so the mic indicator goes out
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+    return 0
+
+
+def run_app(config_path: Path = CONFIG_PATH) -> int:
+    """Start the app, on whichever platform this is."""
+    if sys.platform == "darwin":
+        return _run_app_mac(config_path)
+    return _run_app_windows(config_path)

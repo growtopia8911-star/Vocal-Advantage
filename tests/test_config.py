@@ -11,7 +11,13 @@ from pathlib import Path
 
 import pytest
 
-from vocal_advantage.config import CONFIG_PATH, DEFAULTS, load_config, save_config
+from vocal_advantage.config import (
+    CONFIG_PATH,
+    DEFAULT_HOTKEY,
+    DEFAULTS,
+    load_config,
+    save_config,
+)
 
 
 def read_json(path: Path) -> dict:
@@ -28,7 +34,7 @@ def test_config_path_is_config_json_at_the_repo_root():
 @pytest.mark.parametrize(
     ("key", "value"),
     [
-        ("hotkey", "right ctrl"),
+        ("hotkey", DEFAULT_HOTKEY),
         ("language", "en"),
         ("model", "large-v3-turbo"),
         ("device", "auto"),
@@ -86,9 +92,9 @@ def test_unknown_keys_are_preserved(tmp_path):
 
 
 @pytest.mark.parametrize("bad", ["nonsense", "win", "caps lock", ""])
-def test_invalid_hotkey_falls_back_to_right_ctrl_and_warns(tmp_path, capsys, bad):
-    # Spec: on startup an unusable hotkey warns loudly, falls back to
-    # "right ctrl", and the app keeps running. It must never crash.
+def test_invalid_hotkey_falls_back_to_the_default_and_warns(tmp_path, capsys, bad):
+    # Spec: on startup an unusable hotkey warns loudly, falls back to the
+    # platform default, and the app keeps running. It must never crash.
     #
     # Each case exercises a different refusal in Task 2's parse_hotkey:
     # "nonsense" is not a key name; "win" is a bare Windows key (Task 2
@@ -100,10 +106,10 @@ def test_invalid_hotkey_falls_back_to_right_ctrl_and_warns(tmp_path, capsys, bad
 
     cfg = load_config(path)
 
-    assert cfg["hotkey"] == "right ctrl"
+    assert cfg["hotkey"] == DEFAULT_HOTKEY
     err = capsys.readouterr().err
     assert "WARNING" in err
-    assert "right ctrl" in err
+    assert DEFAULT_HOTKEY in err
     assert str(path) in err, "the warning must name the file the user has to fix"
     # The file is left exactly as typed, so the user can see and fix their typo.
     assert read_json(path)["hotkey"] == bad
@@ -128,7 +134,7 @@ def test_non_string_hotkey_falls_back_instead_of_crashing(tmp_path, capsys):
 
     cfg = load_config(path)
 
-    assert cfg["hotkey"] == "right ctrl"
+    assert cfg["hotkey"] == DEFAULT_HOTKEY
     assert "WARNING" in capsys.readouterr().err
 
 
@@ -138,7 +144,7 @@ def test_loading_does_not_mutate_defaults(tmp_path):
     cfg["hotkey"] = "f12"
     cfg["injected"] = True
 
-    assert DEFAULTS["hotkey"] == "right ctrl"
+    assert DEFAULTS["hotkey"] == DEFAULT_HOTKEY
     assert "injected" not in DEFAULTS
 
 
@@ -163,3 +169,20 @@ def test_save_config_writes_readable_json(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert text.count("\n") >= len(DEFAULTS)
     assert text.endswith("\n")
+
+
+def test_the_default_hotkey_matches_the_platform():
+    """Right Ctrl does not exist on a MacBook keyboard at all.
+
+    Shipping it as the macOS default would hand every new Mac user a key they
+    physically cannot press, and the app would look broken before they ever
+    reached --set-hotkey. Right Option is the closest analogue: present on every
+    Mac, does nothing on its own.
+    """
+    import sys
+
+    from vocal_advantage.config import DEFAULT_HOTKEY
+
+    expected = "right alt" if sys.platform == "darwin" else "right ctrl"
+    assert DEFAULT_HOTKEY == expected
+    assert DEFAULTS["hotkey"] == DEFAULT_HOTKEY

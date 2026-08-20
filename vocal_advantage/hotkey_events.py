@@ -242,3 +242,37 @@ class EdgeDetector:
                 return Edge.HOTKEY_UP
             return Edge.COMBO_UP
         return Edge.OTHER_UP
+
+
+class CaptureSession:
+    """Remembers the largest set of keys held at the same time.
+
+    "Largest simultaneously-held set", not "last chord": the user rarely
+    releases both halves of a combo at the same instant, so the moment of
+    maximum overlap is the honest reading of what they meant.
+
+    Portable - the platform modules decode their own events and call ``feed``.
+    """
+
+    def __init__(self) -> None:
+        self._held: set[str] = set()
+        self._largest: frozenset[str] = frozenset()
+
+    @property
+    def largest(self) -> frozenset[str]:
+        return self._largest
+
+    @property
+    def done(self) -> bool:
+        return bool(self._largest) and not self._held
+
+    def feed(self, name: str | None, is_down: bool) -> None:
+        key = normalise_key_name(name)
+        if key is None:
+            return
+        if is_down:
+            self._held.add(key)
+            if len(self._held) > len(self._largest):
+                self._largest = frozenset(self._held)
+        else:
+            self._held.discard(key)

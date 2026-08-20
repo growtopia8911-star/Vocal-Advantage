@@ -34,6 +34,7 @@ from vocal_advantage.hotkey_spec import HotkeySpec, parse_hotkey
 # Existing callers and tests import these names from here and must keep working.
 from vocal_advantage.hotkey_events import (  # noqa: F401
     KEY_DOWN,
+    CaptureSession,
     KEY_UP,
     MODIFIER_KEYS,
     Edge,
@@ -168,31 +169,8 @@ class HotkeyListener:
 # --------------------------------------------------------------------------
 
 
-class _CaptureSession:
-    """Remembers the largest set of keys held at the same time."""
-
-    def __init__(self) -> None:
-        self._held: set[str] = set()
-        self._largest: frozenset[str] = frozenset()
-
-    @property
-    def largest(self) -> frozenset[str]:
-        return self._largest
-
-    @property
-    def done(self) -> bool:
-        return bool(self._largest) and not self._held
-
-    def feed(self, name: str | None, is_down: bool) -> None:
-        key = normalise_key_name(name)
-        if key is None:
-            return
-        if is_down:
-            self._held.add(key)
-            if len(self._held) > len(self._largest):
-                self._largest = frozenset(self._held)
-        else:
-            self._held.discard(key)
+class _CaptureSession(CaptureSession):
+    """CaptureSession plus the keyboard library's event shape."""
 
     def feed_event(self, event) -> None:
         event_type = getattr(event, "event_type", None)

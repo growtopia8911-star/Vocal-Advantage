@@ -456,6 +456,124 @@ def test_run_app_sets_dpi_awareness_before_it_builds_the_first_window(
     monkeypatch.setattr(tkinter, "Tk", fake_tk)
 
     with pytest.raises(StopBeforeTheAppStarts):
-        va_main.run_app(tmp_path / "config.json")
+        # The Windows launcher specifically: run_app now dispatches by platform,
+        # and this ordering is a Windows requirement. tk is faked, so it still
+        # runs anywhere.
+        va_main._run_app_windows(tmp_path / "config.json")
 
     assert order == ["set_dpi_awareness", "tk.Tk"]
+
+
+# --------------------------------------------------------------------------
+# Platform selection
+# --------------------------------------------------------------------------
+
+
+def test_the_platform_modules_match_the_host():
+    """One codebase, two machines. main is the only place that chooses."""
+    hotkey, paste = va_main.platform_modules()
+    if sys.platform == "darwin":
+        assert hotkey.__name__.endswith("hotkey_mac")
+        assert paste.__name__.endswith("paste_mac")
+    else:
+        assert hotkey.__name__.endswith("hotkey_win")
+        assert paste.__name__.endswith("paste_win")
+
+
+def test_both_platform_hotkey_modules_offer_the_same_two_entry_points():
+    """--set-hotkey must work on both, or choosing your own key is
+    Windows-only. This is the contract main.py depends on."""
+    from vocal_advantage import hotkey_mac, hotkey_win
+
+    for module in (hotkey_win, hotkey_mac):
+        assert hasattr(module, "HotkeyListener"), module.__name__
+        assert hasattr(module, "capture_hotkey"), module.__name__
+
+
+def test_both_platform_paste_modules_expose_paste_text():
+    from vocal_advantage import paste_mac, paste_win
+
+    for module in (paste_win, paste_mac):
+        assert callable(module.paste_text), module.__name__
+
+
+# --------------------------------------------------------------------------
+# The console indicator that stands in for the pill on macOS
+# --------------------------------------------------------------------------
+
+
+def test_the_console_indicator_satisfies_everything_the_controller_calls():
+    """controller.py must not change for the port, so this has to answer to the
+    same four methods the Windows pill does."""
+    indicator = va_main.ConsoleIndicator()
+    for method in ("show_recording", "show_processing", "hide", "flash"):
+        assert callable(getattr(indicator, method)), method
+    # And none of them may raise: the controller calls them inside its own
+    # try/finally, but a throwing indicator would still break a dictation.
+    indicator.show_recording()
+    indicator.show_processing()
+    indicator.flash("nothing heard")
+    indicator.hide()
+
+
+def test_the_console_indicator_says_something_useful_while_recording(capsys):
+    indicator = va_main.ConsoleIndicator()
+    indicator.show_recording()
+    assert capsys.readouterr().out.strip() != ""
+
+
+# --------------------------------------------------------------------------
+# Single-instance lock, on whichever platform we are
+# --------------------------------------------------------------------------
+
+
+def test_a_second_instance_is_refused_on_this_platform():
+    """Two instances would both hook the keyboard and both paste -- every
+    dictation would land twice."""
+    name = "VocalAdvantageTest_%d" % os.getpid()
+
+    first = va_main.acquire_single_instance_lock(name)
+    assert first is not None, "the first acquire should succeed"
+    try:
+        assert va_main.acquire_single_instance_lock(name) is None, (
+            "a second acquire must report the name is already taken"
+        )
+    finally:
+        va_main.release_single_instance_lock(first)
+
+    # Freeing it makes relaunching after a crash work.
+    again = va_main.acquire_single_instance_lock(name)
+    assert again is not None
+    va_main.release_single_instance_lock(again)
+
+
+def test_run_app_on_mac_never_touches_tkinter(tmp_path, monkeypatch):
+    """With no pill there is no reason to build a Tk root, and doing so would
+    put a Python rocket in the Dock and steal focus on launch."""
+    import tkinter
+
+    touched = []
+    monkeypatch.setattr(tkinter, "Tk", lambda *a, **k: touched.append("Tk"))
+
+    class StopBeforeTheModelLoads(Exception):
+        pass
+
+    def stop():
+        raise StopBeforeTheModelLoads
+
+    monkeypatch.setattr(va_main, "import_transcriber_class", stop)
+
+    with pytest.raises(StopBeforeTheModelLoads):
+        va_main._run_app_mac(tmp_path / "config.json")
+
+    assert touched == []
+
+
+def test_run_app_dispatches_to_the_right_platform(monkeypatch):
+    calls = []
+    monkeypatch.setattr(va_main, "_run_app_mac", lambda p: calls.append("mac") or 0)
+    monkeypatch.setattr(va_main, "_run_app_windows", lambda p: calls.append("win") or 0)
+
+    va_main.run_app(Path("ignored.json"))
+
+    assert calls == ["mac" if sys.platform == "darwin" else "win"]

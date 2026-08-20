@@ -20,8 +20,17 @@ CONFIG_PATH: Path = Path(__file__).resolve().parent.parent / "config.json"
 # Exactly the spec's "Config defaults" block. min_duration_s 0.4 is the first
 # hallucination guard (a short tap never reaches the model); max_duration_s 300
 # is the watchdog that force-stops a forgotten recording.
+# "right ctrl" does not exist on a MacBook keyboard at all -- the right-hand
+# side is Command, Option, arrows. Shipping it as the macOS default would hand a
+# new Mac user a key they physically cannot press, and the app would look broken
+# before they ever found --set-hotkey. Right Option is the closest analogue:
+# present on every Mac, does nothing on its own, and maps onto the same shared
+# key vocabulary ("right alt"), so one config.json stays portable between
+# machines.
+DEFAULT_HOTKEY: str = "right alt" if sys.platform == "darwin" else "right ctrl"
+
 DEFAULTS: dict = {
-    "hotkey": "right ctrl",
+    "hotkey": DEFAULT_HOTKEY,
     "language": "en",
     "model": "large-v3-turbo",
     "device": "auto",

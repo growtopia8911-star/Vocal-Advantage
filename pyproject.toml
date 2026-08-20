@@ -32,6 +32,9 @@ dependencies = [
     "sounddevice==0.5.6",
     "keyboard==0.13.5; sys_platform == 'win32'",
     "pywin32; sys_platform == 'win32'",
+    # macOS only. The event tap for the key hook and CGEvent/NSPasteboard
+    # for the paste. 6.9 MB. Not installed on Windows.
+    "pyobjc-framework-Quartz; sys_platform == 'darwin'",
     "numpy",
 ]
 
