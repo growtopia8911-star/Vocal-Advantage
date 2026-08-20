@@ -367,10 +367,16 @@ FIXTURE_WAV = Path(__file__).resolve().parent / "fixtures" / "testing_one_two_th
 
 @pytest.mark.slow
 def test_the_real_model_transcribes_the_fixture_wav():
-    """Real model, real GPU, real 1.6 GB download. Not part of the default run.
+    """Real model, real audio, no fakes. Not part of the default run.
 
     Record the fixture once (see the task notes), then:
         python -m pytest -m slow tests/test_transcriber.py
+
+    Uses whatever config.json names rather than a hardcoded model. It used to
+    pin large-v3-turbo, so running the suite silently pulled 1.5 GB -- which it
+    duly did on 2026-08-20, re-downloading a model deleted an hour earlier. A
+    test that costs a gigabyte to run is a test people stop running, and this
+    one exercises the wiring, not any particular model.
     """
     if not FIXTURE_WAV.exists():
         pytest.skip(f"no fixture at {FIXTURE_WAV}; record it first")
@@ -386,11 +392,14 @@ def test_the_real_model_transcribes_the_fixture_wav():
 
     audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
+    from vocal_advantage.config import load_config
+
+    cfg = load_config()
     transcriber = Transcriber(
-        model_name="large-v3-turbo",
-        device="auto",
-        language="en",
-        min_duration_s=0.4,
+        model_name=cfg["model"],
+        device=cfg["device"],
+        language=cfg["language"],
+        min_duration_s=float(cfg["min_duration_s"]),
     )
     text = transcriber.transcribe(audio)
 
