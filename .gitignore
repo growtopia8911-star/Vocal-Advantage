@@ -4,6 +4,8 @@
 config.json
 # personal: names and jargon you dictate
 dictionary.json
+# everything you have ever dictated; never leaves the machine
+logs/history.jsonl
 
 # python
 .venv/

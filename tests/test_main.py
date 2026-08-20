@@ -27,6 +27,7 @@ import numpy as np
 import pytest
 
 from vocal_advantage import cleanup as va_cleanup
+from vocal_advantage import history as va_history
 from vocal_advantage import main as va_main
 from vocal_advantage.hotkey_spec import HotkeyError, parse_hotkey
 
@@ -1311,3 +1312,155 @@ def test_no_skip_list_leaves_the_cleaner_untouched():
     # Preserves the original contract: with nothing to wrap, _cleaner returns
     # the cleanup function itself rather than a closure around it.
     assert va_main._cleaner({"skip_cleanup_in": []}) is va_cleanup.clean_speech
+
+
+# --------------------------------------------------------------------------
+# v0.5: sounds follow the state machine, history keeps what was said
+# --------------------------------------------------------------------------
+
+
+class _Player:
+    def __init__(self):
+        self.played = []
+
+    def play(self, kind):
+        self.played.append(kind)
+
+
+class _Indicator:
+    def __init__(self):
+        self.calls = []
+
+    def show_recording(self):
+        self.calls.append("recording")
+
+    def show_processing(self):
+        self.calls.append("processing")
+
+    def hide(self):
+        self.calls.append("hide")
+
+    def flash(self, message):
+        self.calls.append(("flash", message))
+
+    def status_text(self):
+        return "Idle"
+
+
+def _sounding():
+    inner, player = _Indicator(), _Player()
+    return va_main.SoundingIndicator(inner, player), inner, player
+
+
+def test_a_finished_dictation_plays_the_done_tone():
+    sounding, _, player = _sounding()
+    sounding.show_recording()
+    sounding.show_processing()
+    sounding.hide()
+    assert player.played[-1] == "done"
+
+
+def test_a_cancelled_recording_does_not_claim_success():
+    # hide() also fires on cancel and on a tap too short to transcribe. A
+    # success tone for either would be a lie, and this is why "done" is not
+    # simply wired to hide().
+    sounding, _, player = _sounding()
+    sounding.show_recording()
+    sounding.hide()
+    assert "done" not in player.played
+
+
+def test_a_failure_plays_the_error_tone():
+    sounding, _, player = _sounding()
+    sounding.show_recording()
+    sounding.show_processing()
+    sounding.flash("nothing heard")
+    assert player.played[-1] == "error"
+
+
+def test_an_error_is_not_followed_by_a_success_tone():
+    sounding, _, player = _sounding()
+    sounding.show_recording()
+    sounding.show_processing()
+    sounding.flash("could not paste")
+    sounding.hide()
+    assert player.played.count("done") == 0
+
+
+def test_the_wrapper_passes_everything_through_to_the_real_indicator():
+    # The pill must behave identically whether sounds are on or off.
+    sounding, inner, _ = _sounding()
+    sounding.show_recording()
+    sounding.show_processing()
+    sounding.flash("nothing heard")
+    sounding.hide()
+    assert inner.calls == [
+        "recording", "processing", ("flash", "nothing heard"), "hide"
+    ]
+
+
+def test_the_tray_can_still_read_the_status_through_the_wrapper():
+    sounding, _, _ = _sounding()
+    assert sounding.status_text() == "Idle"
+
+
+def test_two_dictations_in_a_row_each_get_their_own_tone():
+    sounding, _, player = _sounding()
+    for _ in range(2):
+        sounding.show_recording()
+        sounding.show_processing()
+        sounding.hide()
+    assert player.played.count("done") == 2
+
+
+# --- history ---------------------------------------------------------------
+
+
+class _Paster:
+    def __init__(self, succeeds=True):
+        self.succeeds = succeeds
+        self.pasted = []
+
+    def paste_text(self, text):
+        self.pasted.append(text)
+        return self.succeeds
+
+
+def test_a_dictation_is_written_to_the_history(tmp_path):
+    history = va_history.History(tmp_path / "h.jsonl")
+    paster = va_main.RecordingPaster(_Paster(), history)
+    paster.paste_text("hello there")
+    assert "hello there" in (tmp_path / "h.jsonl").read_text(encoding="utf-8")
+
+
+def test_a_dictation_is_recorded_even_when_the_paste_fails(tmp_path):
+    # The whole point of the history is the dictation that did NOT arrive
+    # where it was meant to. Recording only on success loses exactly that case.
+    history = va_history.History(tmp_path / "h.jsonl")
+    paster = va_main.RecordingPaster(_Paster(succeeds=False), history)
+    assert paster.paste_text("words that went missing") is False
+    assert "went missing" in (tmp_path / "h.jsonl").read_text(encoding="utf-8")
+
+
+def test_the_paste_result_is_passed_through_unchanged(tmp_path):
+    history = va_history.History(tmp_path / "h.jsonl", enabled=False)
+    assert va_main.RecordingPaster(_Paster(True), history).paste_text("x") is True
+    assert va_main.RecordingPaster(_Paster(False), history).paste_text("x") is False
+
+
+def test_history_can_be_switched_off(tmp_path):
+    path = tmp_path / "h.jsonl"
+    history = va_history.History(path, enabled=False)
+    va_main.RecordingPaster(_Paster(), history).paste_text("hello")
+    assert not path.exists()
+
+
+def test_the_player_is_built_from_config():
+    assert va_main._make_player({"sounds": False}).enabled is False
+    assert va_main._make_player({"sounds": True}).enabled is True
+    assert va_main._make_player({"sound_on_start": True}).on_start is True
+
+
+def test_the_start_tone_is_off_unless_asked_for():
+    # It plays while the microphone is open; on speakers it feeds back in.
+    assert va_main._make_player({}).on_start is False

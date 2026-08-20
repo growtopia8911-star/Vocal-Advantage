@@ -31,6 +31,8 @@ from vocal_advantage.console import say, warn
 from vocal_advantage.controller import DictationController
 from vocal_advantage.dictionary import DICTIONARY_PATH, load_dictionary
 from vocal_advantage.frontmost import frontmost_app, matches
+from vocal_advantage.history import HISTORY_PATH, History
+from vocal_advantage.sounds import Player
 from vocal_advantage.hotkey_spec import HotkeyError, HotkeySpec, parse_hotkey
 from vocal_advantage.cleanup import ai_clean, clean_speech, warm_up_model
 from vocal_advantage.streaming import StreamingTranscript
@@ -506,6 +508,84 @@ def run_set_hotkey(
     return 1
 
 
+class SoundingIndicator:
+    """Wraps the indicator so the tones follow the state machine.
+
+    Here rather than inside `controller.py` because the controller has no
+    business knowing about audio, and the four methods it already calls happen
+    to be exactly the events worth hearing.
+
+    "Done" is deliberately not simply `hide()`. hide() also fires when a
+    recording is cancelled and when a tap was too short to transcribe, and a
+    success tone for those would be a lie. Tracking whether transcription
+    actually started is what tells the three apart.
+    """
+
+    def __init__(self, inner, player) -> None:
+        self._inner = inner
+        self._player = player
+        self._processed = False
+
+    def show_recording(self) -> None:
+        self._processed = False
+        self._player.play("start")
+        self._inner.show_recording()
+
+    def show_processing(self) -> None:
+        self._processed = True
+        self._inner.show_processing()
+
+    def hide(self) -> None:
+        if self._processed:
+            self._player.play("done")
+        self._processed = False
+        self._inner.hide()
+
+    def flash(self, message: str) -> None:
+        self._processed = False
+        self._player.play("error")
+        self._inner.flash(message)
+
+    # The tray reads this straight through; the wrapper is invisible to it.
+    def status_text(self) -> str:
+        return self._inner.status_text()
+
+
+class RecordingPaster:
+    """Wraps a paster so every dictation is written to the history first.
+
+    First, not after: the point of the history is the dictation that did NOT
+    arrive where it was meant to. Recording only on success would lose exactly
+    the case it exists for.
+
+    What is stored is the transcript as the controller delivered it, before the
+    cleanup pass -- which is what you actually said, and the more useful thing
+    to find when you are looking for words that went missing.
+    """
+
+    def __init__(self, inner, history) -> None:
+        self._inner = inner
+        self._history = history
+
+    def paste_text(self, text: str) -> bool:
+        self._history.record(text, app=frontmost_app())
+        return bool(self._inner.paste_text(text))
+
+
+def _make_player(cfg: dict) -> Player:
+    return Player(
+        enabled=bool(cfg.get("sounds", True)),
+        on_start=bool(cfg.get("sound_on_start", False)),
+    )
+
+
+def _make_history(cfg: dict, path: Path = HISTORY_PATH) -> History:
+    history = History(path, enabled=bool(cfg.get("history", True)))
+    if history.enabled:
+        say("History: every dictation is appended to %s" % path)
+    return history
+
+
 def _load_dictionary(path: Path = DICTIONARY_PATH):
     """The personal dictionary, or an empty one. Never raises, and says so.
 
@@ -700,6 +780,8 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     indicator = Indicator(level_source=lambda: recorder.level)
 
     dictionary = _load_dictionary()
+    player = _make_player(cfg)
+    history = _make_history(cfg)
 
     say("Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"]))
     transcriber_cls = import_transcriber_class()
@@ -722,8 +804,11 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
         transcriber=transcriber,
         # paste_win itself satisfies the paster protocol: a module-level
         # paste_text(str) -> bool is the whole interface.
-        paster=CleaningPaster(paste_win, clean=_cleaner(cfg, dictionary)),
-        indicator=indicator,
+        paster=RecordingPaster(
+            CleaningPaster(paste_win, clean=_cleaner(cfg, dictionary)),
+            history,
+        ),
+        indicator=SoundingIndicator(indicator, player),
         min_duration_s=float(cfg["min_duration_s"]),
         max_duration_s=float(cfg["max_duration_s"]),
     )
@@ -841,6 +926,8 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     indicator = Indicator(level_source=lambda: recorder.level)
 
     dictionary = _load_dictionary()
+    player = _make_player(cfg)
+    history = _make_history(cfg)
 
     say("Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"]))
     transcriber_cls = import_transcriber_class()
@@ -868,8 +955,8 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         hotkey=spec,
         recorder=recorder,
         transcriber=NarratingTranscriber(transcriber),
-        paster=live,
-        indicator=indicator,
+        paster=RecordingPaster(live, history),
+        indicator=SoundingIndicator(indicator, player),
         min_duration_s=float(cfg["min_duration_s"]),
         max_duration_s=float(cfg["max_duration_s"]),
         on_partial=live.on_partial if live_typing_enabled(cfg) else None,

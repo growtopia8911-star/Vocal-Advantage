@@ -71,6 +71,17 @@ DEFAULTS: dict = {
     # The personal dictionary still applies here. Skipping *cleanup* is not the
     # same as agreeing to spell your own name wrong.
     "skip_cleanup_in": list(DEFAULT_SKIP_CLEANUP_IN),
+    # Short generated tones on finishing and on failure, so you know what
+    # happened without looking at the screen.
+    "sounds": True,
+    # Separate from "sounds" because it carries a risk the others do not: it
+    # plays while the microphone is open, so on speakers it goes back into the
+    # recording and Whisper transcribes something for it. Safe on headphones.
+    "sound_on_start": False,
+    # Every dictation appended to logs/history.jsonl, so a transcript that
+    # pasted into the wrong window is still recoverable. Never leaves the
+    # machine; gitignored.
+    "history": True,
 }
 
 #: The positions the Flow Bar understands. "bottom-center" is accepted as an
@@ -128,12 +139,29 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
         )
         cfg["hotkey"] = DEFAULTS["hotkey"]
 
-    cfg["flow_bar"] = _checked_flow_bar(cfg["flow_bar"], path)
+    cfg["flow_bar"] = _checked_bool("flow_bar", cfg["flow_bar"], path)
     cfg["flow_bar_position"] = _checked_position(cfg["flow_bar_position"], path)
     cfg["flow_bar_point"] = _checked_point(cfg["flow_bar_point"], path)
     cfg["skip_cleanup_in"] = _checked_skip_list(cfg["skip_cleanup_in"], path)
+    for key in ("sounds", "sound_on_start", "history"):
+        cfg[key] = _checked_bool(key, cfg[key], path)
 
     return cfg
+
+
+def _checked_bool(key: str, value: object, path: Path) -> bool:
+    """A real bool, or the default with a warning.
+
+    Deliberately not ``bool(value)``: that reads the string "false" as True,
+    which is the mistake someone hand-editing JSON is most likely to make.
+    """
+    if isinstance(value, bool):
+        return value
+    warn(
+        f"WARNING: {path}: {key} must be true or false, not {value!r}. "
+        f"Using {DEFAULTS[key]!r} for this run."
+    )
+    return DEFAULTS[key]
 
 
 def _checked_skip_list(value: object, path: Path) -> list:
@@ -173,22 +201,6 @@ def _checked_point(value: object, path: Path) -> list | None:
         f"{value!r}. Using flow_bar_position for this run."
     )
     return None
-
-
-def _checked_flow_bar(value: object, path: Path) -> bool:
-    """A real bool, or the default with a warning.
-
-    Deliberately not ``bool(value)``: that would quietly read the string
-    ``"false"`` as True, which is the exact mistake someone hand-editing JSON
-    is most likely to make.
-    """
-    if isinstance(value, bool):
-        return value
-    warn(
-        f"WARNING: {path}: flow_bar must be true or false, not {value!r}. "
-        f"Using {DEFAULTS['flow_bar']!r} for this run."
-    )
-    return DEFAULTS["flow_bar"]
 
 
 def _checked_position(value: object, path: Path) -> str:

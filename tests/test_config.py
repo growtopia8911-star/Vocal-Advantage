@@ -62,6 +62,9 @@ def test_defaults_has_exactly_the_spec_keys():
         "flow_bar_position",
         "flow_bar_point",
         "skip_cleanup_in",
+        "sounds",
+        "sound_on_start",
+        "history",
         "ai_cleanup",
     }
 
@@ -370,3 +373,29 @@ def test_a_bad_skip_list_warns_and_falls_back(tmp_path, capsys, bad):
     path.write_text(f'{{"skip_cleanup_in": {bad}}}', encoding="utf-8")
     assert "terminal" in load_config(path)["skip_cleanup_in"]
     assert capsys.readouterr().err != ""
+
+
+@pytest.mark.parametrize(
+    "key,expected", [("sounds", True), ("sound_on_start", False), ("history", True)]
+)
+def test_the_v05_toggles_have_the_documented_defaults(key, expected):
+    assert DEFAULTS[key] is expected
+
+
+@pytest.mark.parametrize("key", ["sounds", "sound_on_start", "history", "flow_bar"])
+def test_the_string_false_is_rejected_rather_than_read_as_true(tmp_path, capsys, key):
+    # The mistake someone hand-editing JSON is most likely to make, and
+    # bool("false") is True -- so it would silently do the opposite of what
+    # they asked for.
+    path = tmp_path / "config.json"
+    path.write_text(f'{{"{key}": "false"}}', encoding="utf-8")
+    assert load_config(path)[key] is DEFAULTS[key]
+    assert capsys.readouterr().err != ""
+
+
+@pytest.mark.parametrize("key", ["sounds", "sound_on_start", "history"])
+def test_each_toggle_can_actually_be_switched(tmp_path, key):
+    path = tmp_path / "config.json"
+    flipped = not DEFAULTS[key]
+    path.write_text(f'{{"{key}": {str(flipped).lower()}}}', encoding="utf-8")
+    assert load_config(path)[key] is flipped
