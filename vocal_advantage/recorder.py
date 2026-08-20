@@ -18,6 +18,8 @@ import threading
 
 import numpy as np
 
+from vocal_advantage.waveform import block_rms
+
 try:  # pragma: no cover - the failure path is checked with sd patched to None
     import sounddevice as sd
 except Exception:  # noqa: BLE001 - any import failure means "no audio backend"
@@ -73,10 +75,26 @@ class Recorder:
         self._lock = threading.Lock()
         self._chunks: list[np.ndarray] = []
         self._stream = None
+        # The Flow Bar's waveform, and the reason there is no second microphone
+        # stream in this project. Written by PortAudio's thread, read by the
+        # renderer 60 times a second. A plain float, deliberately: assignment
+        # and read are atomic under the GIL, so the read needs no lock and a
+        # renderer that stalls can never stall the audio callback.
+        self._level = 0.0
 
     @property
     def is_recording(self) -> bool:
         return self._stream is not None
+
+    @property
+    def level(self) -> float:
+        """RMS of the most recent block, or 0.0 when not recording.
+
+        Lock-free on purpose -- see ``_level``. Zero between dictations, because
+        the stream is closed then and a stale value would leave the idle bar
+        frozen mid-syllable.
+        """
+        return self._level
 
     def start(self) -> None:
         """Open the mic. Calling it again while recording does nothing.
@@ -89,6 +107,7 @@ class Recorder:
             return
         with self._lock:
             self._chunks = []
+        self._level = 0.0
         self._stream = self._open_stream()
 
     def stop(self) -> np.ndarray:
@@ -98,6 +117,7 @@ class Recorder:
         float32 array.
         """
         stream, self._stream = self._stream, None
+        self._level = 0.0
         if stream is not None:
             _close_quietly(stream)
         with self._lock:
@@ -129,6 +149,10 @@ class Recorder:
         better than killing the stream mid-sentence.
         """
         block = np.asarray(indata, dtype=np.float32).reshape(-1).copy()
+        # Measured before the lock is taken, never inside it: this runs on
+        # PortAudio's thread, and holding the lock for a microsecond longer
+        # than the append needs is a microsecond the recording can drop in.
+        self._level = block_rms(block)
         with self._lock:
             self._chunks.append(block)
 

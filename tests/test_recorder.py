@@ -457,3 +457,103 @@ def test_snapshot_is_safe_while_the_audio_thread_is_delivering(fake_sd):
     finally:
         stop.set()
         thread.join()
+
+
+# ---------------------------------------------------------------------------
+# The live level tap, for the Flow Bar's waveform
+# ---------------------------------------------------------------------------
+#
+# The overlay needs the current microphone level 60 times a second and must not
+# open a second stream to get it.  So the PortAudio callback computes the RMS of
+# each block it is already copying, and stores it in one plain float.
+#
+# The contract that matters is NOT the number -- it is that reading it can never
+# interfere with recording.  The read takes no lock, so a renderer that stalls
+# cannot stall the audio thread, and audio remains the thing that must not drop.
+
+
+def test_level_starts_at_zero(fake_sd):
+    assert Recorder().level == 0.0
+
+
+def test_level_follows_the_audio(fake_sd):
+    recorder = Recorder()
+    recorder.start()
+    fake_sd.streams[-1].feed(np.full(1024, 0.5, dtype=np.float32))
+    assert recorder.level == pytest.approx(0.5, abs=1e-3)
+
+
+def test_level_of_silence_is_zero(fake_sd):
+    recorder = Recorder()
+    recorder.start()
+    fake_sd.streams[-1].feed(np.zeros(1024, dtype=np.float32))
+    assert recorder.level == 0.0
+
+
+def test_level_tracks_the_most_recent_block(fake_sd):
+    recorder = Recorder()
+    recorder.start()
+    stream = fake_sd.streams[-1]
+    stream.feed(np.full(1024, 0.8, dtype=np.float32))
+    stream.feed(np.full(1024, 0.1, dtype=np.float32))
+    assert recorder.level == pytest.approx(0.1, abs=1e-3)
+
+
+def test_level_returns_to_zero_when_recording_stops(fake_sd):
+    # The stream closes between dictations, so nothing is arriving. A stale
+    # level would leave the idle bar frozen mid-syllable.
+    recorder = Recorder()
+    recorder.start()
+    fake_sd.streams[-1].feed(np.full(1024, 0.5, dtype=np.float32))
+    recorder.stop()
+    assert recorder.level == 0.0
+
+
+def test_level_is_zero_after_a_cancelled_recording(fake_sd):
+    recorder = Recorder()
+    recorder.start()
+    fake_sd.streams[-1].feed(np.full(1024, 0.5, dtype=np.float32))
+    recorder.stop()
+    recorder.start()
+    assert recorder.level == 0.0
+
+
+def test_level_survives_a_block_of_nan(fake_sd):
+    # A nan here would propagate through the whole easing chain and freeze
+    # every bar permanently -- nan never eases back out.
+    recorder = Recorder()
+    recorder.start()
+    fake_sd.streams[-1].feed(np.full(1024, np.nan, dtype=np.float32))
+    assert recorder.level == 0.0
+
+
+def test_level_does_not_disturb_the_captured_audio(fake_sd):
+    # The whole point: measuring must not change what gets transcribed.
+    recorder = Recorder()
+    recorder.start()
+    fake_sd.streams[-1].feed(np.full(512, 0.25, dtype=np.float32))
+    audio = recorder.stop()
+    assert audio.size == 512
+    assert audio == pytest.approx(np.full(512, 0.25, dtype=np.float32))
+
+
+def test_reading_the_level_takes_no_lock(fake_sd):
+    # The requirement, as a test: with the recorder's lock held by a stalled
+    # reader, `level` must still answer. If this ever deadlocks, the renderer
+    # can stall the PortAudio callback and audio will drop.
+    recorder = Recorder()
+    recorder.start()
+    fake_sd.streams[-1].feed(np.full(256, 0.4, dtype=np.float32))
+
+    answered = threading.Event()
+
+    def read_level():
+        recorder.level
+        answered.set()
+
+    with recorder._lock:
+        reader = threading.Thread(target=read_level)
+        reader.start()
+        reader.join(timeout=2.0)
+
+    assert answered.is_set(), "reading level blocked on the recorder's lock"

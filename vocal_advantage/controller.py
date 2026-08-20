@@ -111,6 +111,27 @@ class DictationController:
         else:
             self._handle_up(key)
 
+    def set_hotkey(self, hotkey: HotkeySpec) -> None:
+        """Swap the hotkey without restarting the app.
+
+        Called while the keyboard hook is **stopped**, from whichever thread is
+        running the capture -- which is what makes it safe in a class that is
+        otherwise explicitly not thread-safe. No key events can be in flight,
+        so nothing else is touching this state.
+
+        A recording in progress is cancelled rather than carried over. The keys
+        that started it no longer mean anything, so there would be no event
+        that could ever end it, and the microphone would stay open forever.
+        """
+        if self.state is State.RECORDING:
+            self._cancel()
+        self._hotkey = hotkey
+        # Both cleared, or the new hotkey inherits the old one's physical
+        # state: a key still held from before would count toward the new combo
+        # and could start a recording nobody asked for.
+        self._held = set()
+        self._last_down = {}
+
     def tick(self) -> None:
         """Watchdog, called regularly.  Cheap and safe in any state.
 

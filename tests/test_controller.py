@@ -575,3 +575,69 @@ def test_the_watchdog_still_fires_with_a_partial_hook_attached():
     rig.drive([("down", "f8"), ("wait", 301.0), ("tick",)])
     assert rig.controller.state is State.IDLE
     assert "transcriber.transcribe" in rig.log
+
+
+# ---------------------------------------------------------------------------
+# Changing the hotkey while the app is running
+# ---------------------------------------------------------------------------
+#
+# Driven from the tray menu. The keyboard hook is stopped around the swap, so
+# no key events are in flight -- which is what makes this safe inside a class
+# that is otherwise deliberately not thread-safe.
+
+
+def test_the_new_hotkey_starts_recording():
+    rig = Rig("right ctrl")
+    rig.controller.set_hotkey(parse_hotkey("f8"))
+
+    rig.drive([("down", "f8")])
+    assert rig.controller.state is State.RECORDING
+
+
+def test_the_old_hotkey_stops_doing_anything():
+    rig = Rig("right ctrl")
+    rig.controller.set_hotkey(parse_hotkey("f8"))
+
+    rig.drive([("down", "right ctrl")])
+    assert rig.controller.state is State.IDLE
+
+
+def test_changing_the_hotkey_mid_recording_releases_the_microphone():
+    """Otherwise the microphone stays open forever.
+
+    The keys that started the recording no longer mean anything, so no event
+    could ever arrive that would end it.
+    """
+    rig = Rig("right ctrl")
+    rig.drive([("down", "right ctrl")])
+    assert rig.controller.state is State.RECORDING
+
+    rig.controller.set_hotkey(parse_hotkey("f8"))
+
+    assert rig.controller.state is State.IDLE
+    assert "recorder.stop" in rig.log
+
+
+def test_a_key_still_physically_held_does_not_carry_over():
+    # Hold Right Ctrl, change the hotkey to Right Ctrl + F8, then press F8.
+    # Without clearing _held, the stale Right Ctrl completes the new combo and
+    # starts a recording nobody asked for.
+    rig = Rig("right ctrl")
+    rig.drive([("down", "right ctrl")])
+
+    rig.controller.set_hotkey(parse_hotkey("right ctrl+f8"))
+    rig.drive([("down", "f8")])
+
+    assert rig.controller.state is State.IDLE
+
+
+def test_the_debounce_does_not_carry_over():
+    # The per-key debounce timestamps belong to the old hotkey. A key tapped
+    # just before the change must not be swallowed just after it.
+    rig = Rig("f8")
+    rig.drive([("down", "f8"), ("up", "f8")])
+
+    rig.controller.set_hotkey(parse_hotkey("f8"))
+    rig.drive([("down", "f8")])
+
+    assert rig.controller.state is State.RECORDING
