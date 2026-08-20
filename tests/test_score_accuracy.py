@@ -50,3 +50,19 @@ def test_the_edit_count_and_reference_length_come_back_too():
     rate, edits, ref_len = wer("a b c d", "a x c d")
     assert (edits, ref_len) == (1, 4)
     assert rate == pytest.approx(edits / ref_len)
+
+
+# -- fairness of the measure ------------------------------------------------
+
+
+def test_spelled_out_numbers_score_the_same_as_digits():
+    """Whisper writes "42" for "forty two" and that is desirable, not an error.
+    Scoring it as three edits made the digits clip look 62% wrong when the only
+    real mistakes in it were "are" for "were" and "suit" for "suite"."""
+    assert wer("forty two failures", "42 failures")[0] == pytest.approx(0.0)
+    assert wer("twenty minutes", "20 minutes")[0] == pytest.approx(0.0)
+    assert wer("one hundred", "100")[0] == pytest.approx(0.0)
+
+
+def test_a_real_number_error_is_still_an_error():
+    assert wer("forty two failures", "43 failures")[0] > 0

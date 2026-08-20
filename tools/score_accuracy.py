@@ -24,13 +24,53 @@ import numpy as np  # noqa: E402
 
 from vocal_advantage.cleanup import ai_clean, clean_speech, warm_up_model  # noqa: E402
 from vocal_advantage.config import load_config  # noqa: E402
+from tools.accuracy_session import EXPECTED  # noqa: E402
 from vocal_advantage.transcriber import Transcriber  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "accuracy"
 
 
+_UNITS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19,
+}
+_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90,
+}
+
+
+def _fold_numbers(words: list[str]) -> list[str]:
+    """"forty two" -> "42", so writing digits is not counted as three errors.
+
+    Whisper turning spoken numbers into digits is desirable behaviour. Scoring
+    it as a mistake made the digits clip read 62% wrong when its only real
+    errors were "are" for "were" and "suit" for "suite".
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word in _TENS and i + 1 < len(words) and words[i + 1] in _UNITS:
+            out.append(str(_TENS[word] + _UNITS[words[i + 1]]))
+            i += 2
+            continue
+        if word in _TENS:
+            out.append(str(_TENS[word]))
+        elif word in _UNITS:
+            out.append(str(_UNITS[word]))
+        elif word == "hundred" and out and out[-1].isdigit():
+            out[-1] = str(int(out[-1]) * 100)
+        else:
+            out.append(word)
+        i += 1
+    return out
+
+
 def normalise(text: str) -> list[str]:
-    return re.sub(r"[^\w\s']", " ", text.lower()).split()
+    return _fold_numbers(re.sub(r"[^\w\s']", " ", text.lower()).split())
 
 
 def wer(reference: str, hypothesis: str) -> tuple[float, int, int]:
@@ -79,8 +119,12 @@ def main() -> int:
         raw = t.transcribe(audio)
         final = ai_clean(raw) if ai_on else clean_speech(raw)
 
+        # raw is judged against what was spoken; final against what should
+        # end up in the document, which is not the same string wherever the
+        # cleanup is supposed to act.
+        want = EXPECTED.get(item["label"], said)
         raw_wer, raw_edits, ref_len = wer(said, raw)
-        fin_wer, fin_edits, _ = wer(said, final)
+        fin_wer, fin_edits, _ = wer(want, final)
         totals[0] += raw_edits
         totals[1] += fin_edits
         totals[2] += ref_len
