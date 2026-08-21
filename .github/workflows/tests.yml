@@ -21,6 +21,9 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # A hung job otherwise runs to GitHub's 6h cap; nothing here takes
+    # more than about three minutes.
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -41,3 +44,11 @@ jobs:
       # ModuleNotFoundError: No module named 'vocal_advantage'.
       - name: Test
         run: python -m pytest -q
+
+      # A smoke test that needs no audio, display or model: if --version
+      # works, the import graph is intact on this platform. This is the
+      # cheapest check for the bug family found on 2026-08-20 -- four
+      # startup failures from code written on the Mac that had never run
+      # on Windows.
+      - name: Check the app still starts up as far as the model
+        run: python -m vocal_advantage --version
