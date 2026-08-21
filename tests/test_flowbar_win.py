@@ -17,6 +17,8 @@ none of them would be caught by "it ran".
 
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -190,3 +192,32 @@ def test_rows_come_out_bottom_up():
 
 def test_the_real_pill_converts_without_error():
     assert len(premultiplied_bgra(render_frame(a_frame(), 78, 30))) == 78 * 30 * 4
+
+
+# ---------------------------------------------------------------------------
+# The window procedure -- Windows only, because off Windows there is no Win32
+# to get the prototype wrong against.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="there is no window procedure off Windows"
+)
+def test_the_window_procedure_survives_a_pointer_sized_lparam():
+    """lparam is pointer-sized and really does carry pointers -- WM_CREATE
+    passes a ``CREATESTRUCTW*``.
+
+    Without an explicit ``argtypes`` on ``DefWindowProcW`` ctypes marshals it
+    as a 32-bit C int, and the first message the window ever receives raises
+    ``OverflowError: int too long to convert``. It happens inside a ctypes
+    callback, where the exception cannot propagate: Python prints the
+    traceback, hands Windows a 0, and the message goes unhandled -- so the
+    overlay half-works and floods the console instead of failing outright.
+    Found the first time this was run on Windows, on 2026-08-20.
+    """
+    from vocal_advantage.flowbar_win import _default_wndproc
+
+    # WM_NULL, so DefWindowProcW is guaranteed to return 0 and we are testing
+    # the marshalling and nothing else.
+    assert _default_wndproc(0, 0, 0, 0x7FFF_FFFF_FFFF) == 0
+    assert _default_wndproc(0, 0, 0, -1) == 0

@@ -126,10 +126,26 @@ if sys.platform == "win32":  # pragma: no cover - Windows only
     class BITMAPINFO(ctypes.Structure):
         _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
 
+    # LRESULT is LONG_PTR -- 64-bit in a 64-bit process. Declaring the window
+    # procedure as returning c_long (32-bit) truncates every reply we give
+    # Windows.
+    LRESULT = ctypes.c_ssize_t
+
     WNDPROC = ctypes.WINFUNCTYPE(
-        ctypes.c_long, wintypes.HWND, wintypes.UINT,
+        LRESULT, wintypes.HWND, wintypes.UINT,
         wintypes.WPARAM, wintypes.LPARAM,
     )
+
+    # Without an explicit prototype ctypes marshals every Python int as a
+    # 32-bit C int. lparam is pointer-sized and genuinely carries pointers
+    # (WM_CREATE passes a CREATESTRUCTW*), so the very first message raises
+    # "OverflowError: int too long to convert" inside the callback -- where
+    # Python cannot propagate it, so it prints a traceback, returns 0 to
+    # Windows, and the message goes unhandled.
+    _user32.DefWindowProcW.argtypes = [
+        wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+    ]
+    _user32.DefWindowProcW.restype = LRESULT
 
     class WNDCLASSEXW(ctypes.Structure):
         _fields_ = [
@@ -149,7 +165,7 @@ if sys.platform == "win32":  # pragma: no cover - Windows only
 else:  # pragma: no cover - lets this file import on macOS for the tests
     _user32 = _gdi32 = _shcore = None
     POINT = SIZE = BLENDFUNCTION = BITMAPINFO = BITMAPINFOHEADER = None
-    WNDPROC = WNDCLASSEXW = None
+    WNDPROC = WNDCLASSEXW = LRESULT = None
 
 
 def set_dpi_awareness() -> None:
