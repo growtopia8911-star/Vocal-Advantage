@@ -34,7 +34,12 @@ from vocal_advantage.frontmost import frontmost_app, matches
 from vocal_advantage.history import HISTORY_PATH, History
 from vocal_advantage.sounds import Player
 from vocal_advantage.hotkey_spec import HotkeyError, HotkeySpec, parse_hotkey
-from vocal_advantage.cleanup import ai_clean, clean_speech, warm_up_model
+from vocal_advantage.cleanup import (
+    ai_clean,
+    clean_speech,
+    strip_fillers,
+    warm_up_model,
+)
 from vocal_advantage.streaming import StreamingTranscript
 
 VERSION = "0.1.0"
@@ -144,12 +149,23 @@ def _cleaner(cfg: dict, dictionary=None):
     * The AI pass rewrites whole sentences. Fixing first would let it put
       "Kelvin" back, and the correction would look like it had never happened.
     """
-    if not cfg.get("clean_speech", True):
+    cleaning_on = cfg.get("clean_speech", True)
+
+    if not cleaning_on:
         base = lambda text: text  # noqa: E731 - the identity, deliberately
     elif cfg.get("ai_cleanup", False):
         base = ai_clean
     else:
         base = clean_speech
+
+    # What a skip-listed app gets. Not the identity: fillers are the one part
+    # of the pass that is unwanted everywhere -- "um" is not a valid token in
+    # any shell either -- so what is skipped is the *rest* of it, the
+    # recapitalising and correction-collapsing that break a command.
+    #
+    # Raw mode still wins, or `clean_speech: false` would quietly come to mean
+    # "raw except fillers".
+    skipped = strip_fillers if cleaning_on else base
 
     # Absent (a bare dict in a test) means "no list", not "the defaults" --
     # which is what keeps `_cleaner({}) is clean_speech` true.
@@ -162,7 +178,7 @@ def _cleaner(cfg: dict, dictionary=None):
         # Checked per dictation, not once at startup: the whole point is which
         # window is about to receive this paste, and that changes constantly.
         if skip and matches(frontmost_app(), skip):
-            cleaned = text
+            cleaned = skipped(text)
         else:
             cleaned = base(text)
         return dictionary.apply(cleaned) if dictionary else cleaned

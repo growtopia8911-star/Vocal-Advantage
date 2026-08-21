@@ -1294,13 +1294,15 @@ def test_a_dictionary_that_explodes_never_stops_the_app(tmp_path, capsys):
 # --------------------------------------------------------------------------
 
 
-def test_cleanup_is_skipped_in_a_listed_app():
-    # Filler removal is right for prose and wrong for a shell: it will happily
-    # turn a command into something that does not run.
+def test_the_rewriting_half_of_cleanup_is_skipped_in_a_listed_app():
+    # What must not happen in a shell: `Git status` does not run, and
+    # `--exclude --exclude` is not a stutter to be tidied away. Fillers are a
+    # separate question -- see test_fillers_are_removed_in_a_skipped_app.
     cfg = {"clean_speech": True, "skip_cleanup_in": ["terminal"]}
     clean = va_main._cleaner(cfg)
     with mock.patch.object(va_main, "frontmost_app", lambda: "Terminal"):
-        assert clean("Um, git status") == "Um, git status"
+        assert clean("git status") == "git status"
+        assert clean("git git status") == "git git status"
 
 
 def test_cleanup_still_runs_everywhere_else():
@@ -1336,9 +1338,11 @@ def test_the_app_is_checked_per_dictation_not_once_at_startup():
 
     app = ["Notes"]
     with mock.patch.object(va_main, "frontmost_app", lambda: app[0]):
-        assert clean("Um, hello") != "Um, hello"
+        # Capitalisation is the half that switches off, so it is what tells
+        # the two apps apart.
+        assert clean("um hello") == "Hello"
         app[0] = "Terminal"
-        assert clean("Um, hello") == "Um, hello"
+        assert clean("um hello") == "hello"
 
 
 def test_no_skip_list_leaves_the_cleaner_untouched():
@@ -1709,3 +1713,43 @@ def test_the_prompt_uses_the_plain_indicator_not_the_sounding_one(tmp_path):
     # would beep at you until you pressed something.
     _, _, indicator, _ = _changer(tmp_path, _HotkeyModule())
     assert not isinstance(indicator, va_main.SoundingIndicator)
+
+
+# --------------------------------------------------------------------------
+# Fillers go even where the rest of the cleanup does not
+# --------------------------------------------------------------------------
+
+
+def test_fillers_are_removed_in_a_skipped_app():
+    # The reason skip_cleanup_in exists is that recapitalising breaks a
+    # command. "um" breaks one too -- it is not a valid token in any shell.
+    cfg = {"clean_speech": True, "skip_cleanup_in": ["terminal"]}
+    clean = va_main._cleaner(cfg)
+    with mock.patch.object(va_main, "frontmost_app", lambda: "Terminal"):
+        assert clean("um git status") == "git status"
+
+
+def test_a_skipped_app_is_still_not_recapitalised():
+    # The half that must NOT happen: `Git status` does not run.
+    cfg = {"clean_speech": True, "skip_cleanup_in": ["terminal"]}
+    clean = va_main._cleaner(cfg)
+    with mock.patch.object(va_main, "frontmost_app", lambda: "Terminal"):
+        assert clean("um cd Documents") == "cd Documents"
+
+
+def test_a_skipped_app_keeps_its_self_corrections():
+    cfg = {"clean_speech": True, "skip_cleanup_in": ["terminal"]}
+    clean = va_main._cleaner(cfg)
+    with mock.patch.object(va_main, "frontmost_app", lambda: "Terminal"):
+        assert clean("deploy Tuesday, no, Wednesday") == (
+            "deploy Tuesday, no, Wednesday"
+        )
+
+
+def test_raw_mode_still_means_raw_in_a_skipped_app():
+    # clean_speech=false is a request for the untouched transcript. It has to
+    # win here too, or "raw" would quietly mean "raw except fillers".
+    cfg = {"clean_speech": False, "skip_cleanup_in": ["terminal"]}
+    clean = va_main._cleaner(cfg)
+    with mock.patch.object(va_main, "frontmost_app", lambda: "Terminal"):
+        assert clean("um git status") == "um git status"

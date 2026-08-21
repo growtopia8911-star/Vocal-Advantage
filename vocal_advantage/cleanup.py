@@ -136,6 +136,25 @@ def collapse_corrections(text: str) -> str:
     return text
 
 
+def strip_fillers(text: str) -> str:
+    """Filler words removed, and nothing else whatsoever.
+
+    The pass used where ``skip_cleanup_in`` matches. A shell or an editor is
+    the reason that list exists: ``clean_speech`` also recapitalises and
+    collapses self-corrections, and both of those turn a command into
+    something that does not run -- ``Git status``, or an argument deleted
+    because the speaker happened to say "no".
+
+    Fillers are the part that is never wanted anywhere. "um" is not a valid
+    token in any shell, so removing it is safe in a way the rest of the pass
+    is not. Hence removal only: no capitalisation, no stutter collapse, no
+    correction collapse.
+    """
+    return " ".join(
+        token for token in text.split() if _bare(token) not in FILLERS
+    )
+
+
 def clean_speech(text: str) -> str:
     """Filler words and stutters removed; nothing else touched.
 

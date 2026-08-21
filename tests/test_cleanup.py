@@ -17,6 +17,7 @@ import pytest
 
 from vocal_advantage.cleanup import collapse_corrections  # noqa: F401
 from vocal_advantage.cleanup import clean_speech
+from vocal_advantage.cleanup import strip_fillers
 
 
 # -- the case that started it ----------------------------------------------
@@ -214,3 +215,40 @@ def test_a_correction_never_invents_a_word():
     said_words = {w.strip(",.").lower() for w in said.split()}
     for word in out.split():
         assert word.strip(",.").lower() in said_words
+
+
+# --------------------------------------------------------------------------
+# strip_fillers: the filler-only pass, for apps where cleanup is skipped
+# --------------------------------------------------------------------------
+
+
+def test_strip_fillers_removes_a_filler():
+    assert strip_fillers("um git status") == "git status"
+
+
+def test_strip_fillers_does_not_capitalise():
+    # The whole reason cleanup is skipped in a shell: `Git status` does not
+    # run. Removing the filler must not promote the next word.
+    assert strip_fillers("um git status") == "git status"
+    assert strip_fillers("uh cd Documents") == "cd Documents"
+
+
+def test_strip_fillers_leaves_self_corrections_alone():
+    # collapse_corrections reads "no" as a correction marker. In a shell "no"
+    # is an ordinary word or a flag, and deleting what precedes it would throw
+    # away a real argument.
+    assert strip_fillers("ship Tuesday, no, Wednesday") == "ship Tuesday, no, Wednesday"
+
+
+def test_strip_fillers_leaves_repeated_words_alone():
+    # Stutter collapse is a prose judgement. `--exclude --exclude` is not a
+    # stutter, and this pass has no way to tell.
+    assert strip_fillers("git git status") == "git git status"
+
+
+def test_strip_fillers_on_only_fillers_gives_nothing():
+    assert strip_fillers("um uh erm") == ""
+
+
+def test_strip_fillers_leaves_ordinary_text_untouched():
+    assert strip_fillers("git commit -m 'fix'") == "git commit -m 'fix'"
