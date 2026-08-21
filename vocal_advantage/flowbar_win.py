@@ -65,6 +65,10 @@ DIB_RGB_COLORS = 0
 PM_REMOVE = 0x0001
 WM_DESTROY = 0x0002
 WM_QUIT = 0x0012
+WM_LBUTTONDOWN = 0x0201
+WM_NCLBUTTONDOWN = 0x00A1
+HTCAPTION = 2                        # "treat this click as one on the title bar"
+GWL_EXSTYLE = -20
 
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
@@ -147,6 +151,19 @@ if sys.platform == "win32":  # pragma: no cover - Windows only
     ]
     _user32.DefWindowProcW.restype = LRESULT
 
+    # Same reasoning for every call below that takes a handle or a
+    # pointer-sized argument. This file has already been bitten once.
+    _user32.SendMessageW.argtypes = [
+        wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+    ]
+    _user32.SendMessageW.restype = LRESULT
+    _user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    _user32.GetWindowLongW.restype = wintypes.LONG
+    _user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
+    _user32.SetWindowLongW.restype = wintypes.LONG
+    _user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    _user32.ReleaseCapture.argtypes = []
+
     class WNDCLASSEXW(ctypes.Structure):
         _fields_ = [
             ("cbSize", wintypes.UINT),
@@ -201,6 +218,32 @@ def pill_origin(position: str, width: float, screen_width: int, screen_height: i
     else:
         x = (screen_width - width) / 2.0
     return int(round(x)), int(round(screen_height - wf.SCREEN_MARGIN - wf.PILL_HEIGHT))
+
+
+def point_origin(point, width: float, height: float, screen_width: int,
+                 screen_height: int):
+    """Top-left corner for a *dragged* position, clamped on screen.
+
+    ``point`` is ``(centre_x, bottom_y)`` -- the centre rather than the left
+    edge, so the pill grows symmetrically when it widens for a message instead
+    of drifting sideways.
+
+    **``bottom_y`` is measured downward from the top of the screen here**, and
+    upward from the bottom on macOS, exactly as `pill_origin` is. The saved
+    value therefore means different things on the two machines -- which is
+    fine, because `config.json` is per-machine and gitignored, and is noted
+    because a shared one would silently put the bar in the wrong place.
+
+    The clamp is the point of this function: a saved position can name a
+    monitor that is no longer attached, and a pill nobody can see reads as the
+    app being broken.
+    """
+    centre_x, bottom_y = float(point[0]), float(point[1])
+    x = centre_x - width / 2.0
+    y = bottom_y - height
+    x = max(0.0, min(x, screen_width - width))
+    y = max(0.0, min(y, screen_height - height))
+    return int(round(x)), int(round(y))
 
 
 def render_frame(frame, width: int, height: int) -> Image.Image:
@@ -297,11 +340,15 @@ class FlowBar:
     """The layered window, its own thread, and where on screen it sits."""
 
     def __init__(
-        self, indicator, position: str = "bottom-centre", fps: int = FPS
+        self, indicator, position: str = "bottom-centre", fps: int = FPS,
+        point=None,
     ) -> None:
         self._indicator = indicator
         self._position = position if position in POSITIONS else "bottom-centre"
         self._fps = fps
+        #: (centre_x, bottom_y) once dragged, else None to use `position`.
+        self._point = list(point) if point else None
+        self._movable = False
         self._hwnd = None
         self._width = int(wf.PILL_WIDTH)
         self._stop = threading.Event()
@@ -375,9 +422,7 @@ class FlowBar:
         # which is fine and expected if the bar is ever reopened in one process.
         _user32.RegisterClassExW(ctypes.byref(cls))
 
-        screen_w = _user32.GetSystemMetrics(SM_CXSCREEN)
-        screen_h = _user32.GetSystemMetrics(SM_CYSCREEN)
-        x, y = pill_origin(self._position, self._width, screen_w, screen_h)
+        x, y = self._origin(self._width, int(wf.PILL_HEIGHT))
 
         self._hwnd = _user32.CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
@@ -390,6 +435,9 @@ class FlowBar:
         )
         if not self._hwnd:
             raise ctypes.WinError(ctypes.get_last_error())
+
+        # So the shared window procedure can find this instance again.
+        _WINDOWS[int(self._hwnd)] = self
 
         # ShowWindow with SW_SHOWNOACTIVATE, never SW_SHOW: the overlay must
         # not take focus even once, or the first paste of the session lands in
@@ -445,11 +493,50 @@ class FlowBar:
         _gdi32.DeleteDC(mem_dc)
         _user32.ReleaseDC(None, screen_dc)
 
-    def _reposition(self, width: int, height: int) -> None:
-        """Re-anchor as the pill widens for a message, so it does not drift."""
+    def _origin(self, width: int, height: int):
+        """Where the pill goes: a dragged point if there is one, else a preset."""
         screen_w = _user32.GetSystemMetrics(SM_CXSCREEN)
         screen_h = _user32.GetSystemMetrics(SM_CYSCREEN)
-        x, y = pill_origin(self._position, width, screen_w, screen_h)
+        if self._point is not None:
+            return point_origin(self._point, width, height, screen_w, screen_h)
+        return pill_origin(self._position, width, screen_w, screen_h)
+
+    # -- move mode ----------------------------------------------------------
+
+    @property
+    def movable(self) -> bool:
+        return self._movable
+
+    def set_movable(self, movable: bool) -> None:
+        """Move mode and click-through are one setting, not two.
+
+        A window carrying WS_EX_TRANSPARENT never receives the mouse-down that
+        would start a drag, so the bit has to come off for the duration. That
+        is why this is an explicit menu item rather than something always on:
+        while it is set, the pill really does intercept clicks.
+        """
+        self._movable = bool(movable)
+        if not self._hwnd:
+            return
+        ex = _user32.GetWindowLongW(self._hwnd, GWL_EXSTYLE)
+        if self._movable:
+            ex &= ~WS_EX_TRANSPARENT
+        else:
+            ex |= WS_EX_TRANSPARENT
+        _user32.SetWindowLongW(self._hwnd, GWL_EXSTYLE, ex)
+
+    def current_point(self):
+        """Where the pill is now, as (centre_x, bottom_y), or None."""
+        if not self._hwnd:
+            return None
+        rect = wintypes.RECT()
+        if not _user32.GetWindowRect(self._hwnd, ctypes.byref(rect)):
+            return None
+        return [(rect.left + rect.right) / 2.0, float(rect.bottom)]
+
+    def _reposition(self, width: int, height: int) -> None:
+        """Re-anchor as the pill widens for a message, so it does not drift."""
+        x, y = self._origin(width, height)
         _user32.SetWindowPos(
             self._hwnd, HWND_TOPMOST, x, y, width, height,
             SWP_NOACTIVATE | SWP_SHOWWINDOW,
@@ -457,9 +544,25 @@ class FlowBar:
 
     def _destroy_window(self) -> None:
         if self._hwnd:
+            _WINDOWS.pop(int(self._hwnd), None)
             _user32.DestroyWindow(self._hwnd)
             self._hwnd = None
 
 
+#: hwnd -> FlowBar. The window procedure is one module-level function shared by
+#: every window, so it has no `self`; this is how a message finds its bar.
+_WINDOWS: dict = {}
+
+
 def _default_wndproc(hwnd, message, wparam, lparam):  # pragma: no cover - Windows
+    if message == WM_LBUTTONDOWN:
+        bar = _WINDOWS.get(int(hwnd) if hwnd else 0)
+        if bar is not None and bar.movable:
+            # Hand the drag to Windows rather than tracking the mouse
+            # ourselves: it runs its own modal move loop, so there is no
+            # capture to leak, no timer, and it behaves like every other
+            # window on the machine -- including snapping and Esc to cancel.
+            _user32.ReleaseCapture()
+            _user32.SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
+            return 0
     return _user32.DefWindowProcW(hwnd, message, wparam, lparam)

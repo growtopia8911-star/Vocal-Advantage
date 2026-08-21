@@ -27,7 +27,9 @@ from vocal_advantage import waveform as wf
 from vocal_advantage.flowbar import Frame
 from vocal_advantage.flowbar_win import (
     SIDE_MARGIN,
+    FlowBar,
     pill_origin,
+    point_origin,
     premultiplied_bgra,
     render_frame,
 )
@@ -221,3 +223,61 @@ def test_the_window_procedure_survives_a_pointer_sized_lparam():
     # the marshalling and nothing else.
     assert _default_wndproc(0, 0, 0, 0x7FFF_FFFF_FFFF) == 0
     assert _default_wndproc(0, 0, 0, -1) == 0
+
+
+# ---------------------------------------------------------------------------
+# The contract main.py relies on
+#
+# All of this is plain introspection and arithmetic, so it runs on the Mac --
+# which is the entire point. `main._make_flow_bar` passed `point=` to a Windows
+# FlowBar that had never accepted it, so the overlay raised TypeError and was
+# swallowed by the "decoration must never stop dictation" guard. Under the .pyw
+# launcher there is no console, so it failed in total silence: no pill, no
+# error, nothing to search for.
+# ---------------------------------------------------------------------------
+
+
+def test_flowbar_accepts_every_argument_main_passes_it():
+    """main._make_flow_bar constructs the bar as
+    FlowBar(indicator, position=..., point=...). The macOS twin took `point`
+    and this one did not, so the whole overlay was dead on Windows."""
+    import inspect
+
+    accepted = set(inspect.signature(FlowBar.__init__).parameters)
+    for name in ("indicator", "position", "point"):
+        assert name in accepted, f"main.py passes {name!r} and FlowBar rejects it"
+
+
+def test_flowbar_exposes_the_move_mode_api_the_tray_menu_calls():
+    """main._move_mode reads `bar.movable` and calls `bar.set_movable`, and the
+    quit path calls `bar.current_point()`. Missing any of them is an
+    AttributeError from a menu click, long after startup looked fine."""
+    for name in ("movable", "set_movable", "current_point", "open", "close"):
+        assert hasattr(FlowBar, name), f"FlowBar is missing {name!r}"
+
+
+def test_a_dragged_point_is_centred_on_that_point():
+    # (centre_x, bottom_y) -- centre, so a widening pill grows symmetrically
+    # instead of drifting sideways.
+    x, y = point_origin([400.0, 300.0], 78, 30, 1920, 1080)
+    assert (x + 78 / 2, y + 30) == (400.0, 300.0)
+
+
+def test_a_dragged_point_off_the_screen_is_clamped_back_on():
+    # A saved position can name a monitor that is no longer plugged in, and a
+    # pill nobody can see reads as the app being broken.
+    x, y = point_origin([9999.0, 9999.0], 78, 30, 1920, 1080)
+    assert 0 <= x <= 1920 - 78
+    assert 0 <= y <= 1080 - 30
+
+    x, y = point_origin([-500.0, -500.0], 78, 30, 1920, 1080)
+    assert (x, y) == (0, 0)
+
+
+def test_y_for_a_dragged_point_is_measured_downward():
+    """The macOS twin measures bottom_y upward from the bottom of the screen.
+    Same picture, opposite arithmetic -- the exact trap `pill_origin` already
+    has its own test for."""
+    _, near_top = point_origin([960.0, 100.0], 78, 30, 1920, 1080)
+    _, near_bottom = point_origin([960.0, 1000.0], 78, 30, 1920, 1080)
+    assert near_top < near_bottom
