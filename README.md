@@ -121,7 +121,7 @@ shared through git — it is your machine's settings.
 | --- | --- | --- |
 | `hotkey` | `"right ctrl"` | The key you hold to talk. |
 | `language` | `"en"` | English. Fixed, so it never has to guess. |
-| `model` | `"base"` | Which speech model to use. See the table below. |
+| `model` | `"small"` | Which speech model to use. See the table below. |
 | `device` | `"auto"` | Graphics card if there is one, otherwise CPU. |
 | `min_duration_s` | `0.4` | Anything shorter than this is thrown away. |
 | `max_duration_s` | `300` | Force-stops a recording you forgot about, after 5 minutes. |

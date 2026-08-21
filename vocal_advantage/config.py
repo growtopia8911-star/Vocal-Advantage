@@ -34,7 +34,16 @@ DEFAULT_HOTKEY: str = "right alt" if sys.platform == "darwin" else "right ctrl"
 DEFAULTS: dict = {
     "hotkey": DEFAULT_HOTKEY,
     "language": "en",
-    "model": "base",
+    # `small`, not `base`, because it was measured: 9.9% word error against
+    # base's 15.4% on eight known sentences, and `medium` was no better typed
+    # while being 3x slower. See "Accuracy, finally measured" in the project
+    # note.
+    #
+    # This lives here rather than in a config.json because DEFAULTS is the
+    # only place a decision can travel between the Mac and the PC -- the
+    # config file is gitignored, which is why the two machines silently ran
+    # different models for a day.
+    "model": "small",
     "device": "auto",
     "min_duration_s": 0.4,
     "max_duration_s": 300,

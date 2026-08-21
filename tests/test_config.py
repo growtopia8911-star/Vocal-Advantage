@@ -37,7 +37,7 @@ def test_config_path_is_config_json_at_the_repo_root():
     [
         ("hotkey", DEFAULT_HOTKEY),
         ("language", "en"),
-        ("model", "base"),
+        ("model", "small"),
         ("clean_speech", True),
         ("ai_cleanup", False),
         ("device", "auto"),
