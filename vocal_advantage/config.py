@@ -51,6 +51,11 @@ DEFAULTS: dict = {
     # false for the raw transcript. Not in the original spec: added once a
     # real dictation came back as "Um, so I think we should ship it on
     # Friday." -- Whisper punctuates well but keeps every "um".
+    # macOS only -- Windows types the whole transcript on key release and has
+    # no live preview to switch off. True keeps the behaviour every existing
+    # config already had; set false to keep a bigger model affordable, since
+    # each live pass re-transcribes the sentence from the start.
+    "live_typing": True,
     "clean_speech": True,
     # An extra pass through a local Ollama model (qwen3:4b) that collapses
     # self-corrections and breaks run-on speech into sentences. Off by

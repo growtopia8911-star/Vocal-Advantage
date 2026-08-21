@@ -66,6 +66,7 @@ def test_defaults_has_exactly_the_spec_keys():
         "sound_on_start",
         "history",
         "ai_cleanup",
+        "live_typing",
     }
 
 

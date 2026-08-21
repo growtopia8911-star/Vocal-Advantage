@@ -189,13 +189,25 @@ def _warm_up_ai_cleanup(cfg: dict) -> None:
 
 
 def live_typing_enabled(cfg: dict) -> bool:
-    """False while the AI pass is on.
+    """Whether words are typed as they are spoken.
 
-    It can only clean a finished sentence, so words typed as they are spoken
-    would have to be backspaced over afterwards -- into a document we do not
-    own. Nothing is typed until the key is released instead.
+    The AI pass forces this off and always will: it can only clean a finished
+    sentence, so words already typed would have to be backspaced over
+    afterwards, in a document we do not own.
+
+    But that constraint runs one way only, and the two were welded together in
+    both directions by mistake. Turning the AI pass off does not mean live
+    typing is *wanted* -- and on macOS it costs real money, because every pass
+    re-transcribes the sentence from the start. At `small`'s RTF of 0.37 on
+    that CPU a ten-second sentence is ~3.7s per pass, so live typing is what
+    made `small` unaffordable there and `base` the only option.
+
+    Separating them is what lets one machine run `small` with no model and no
+    live preview, which is the combination that was previously unreachable.
     """
-    return not cfg.get("ai_cleanup", False)
+    if cfg.get("ai_cleanup", False):
+        return False
+    return bool(cfg.get("live_typing", True))
 
 
 class CleaningPaster:

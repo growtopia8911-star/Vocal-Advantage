@@ -125,6 +125,7 @@ shared through git — it is your machine's settings.
 | `device` | `"auto"` | Graphics card if there is one, otherwise CPU. |
 | `min_duration_s` | `0.4` | Anything shorter than this is thrown away. |
 | `max_duration_s` | `300` | Force-stops a recording you forgot about, after 5 minutes. |
+| `live_typing` | `true` | **macOS only.** Type words as you speak them. Turn off to keep a larger model affordable — every live pass re-transcribes the sentence from the start. Forced off when `ai_cleanup` is on. |
 | `clean_speech` | `true` | Drops "um", "uh" and stutters before anything is typed. Set `false` for the raw transcript. |
 | `ai_cleanup` | `false` | An extra pass through a local Ollama model. Off: see `docs/plans/2026-08-20-speech-cleanup.md`. Pauses the live word-by-word preview when on. |
 

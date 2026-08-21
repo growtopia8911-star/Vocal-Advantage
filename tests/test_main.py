@@ -995,6 +995,39 @@ def test_live_typing_is_paused_while_ai_cleanup_is_on():
     assert va_main.live_typing_enabled({"ai_cleanup": True}) is False
 
 
+def test_live_typing_can_be_turned_off_without_the_ai_pass():
+    """The two were welded together in both directions, and only one direction
+    is real.
+
+    The AI pass genuinely cannot coexist with live typing. But turning it off
+    does not mean live typing is wanted: every live pass re-transcribes the
+    sentence from the start, which is what made `small` unaffordable on the Mac
+    and left `base` as the only option there. Without this, "no Ollama" and
+    "the accurate model" could not both be had on one machine.
+    """
+    assert va_main.live_typing_enabled({"live_typing": False}) is False
+    assert (
+        va_main.live_typing_enabled({"ai_cleanup": False, "live_typing": False})
+        is False
+    )
+
+
+def test_the_ai_pass_still_wins_over_an_explicit_live_typing_request():
+    """Asking for both is a contradiction, not a preference to honour: the
+    words would be typed and then need backspacing over."""
+    assert (
+        va_main.live_typing_enabled({"ai_cleanup": True, "live_typing": True})
+        is False
+    )
+
+
+def test_live_typing_defaults_to_on_so_no_existing_config_changes():
+    """A key added to DEFAULTS must not alter what a config.json written before
+    it existed does."""
+    assert va_main.live_typing_enabled({}) is True
+    assert va_main.live_typing_enabled({"clean_speech": True}) is True
+
+
 # --------------------------------------------------------------------------
 # The UI is decoration: losing it must never cost dictation
 # --------------------------------------------------------------------------
