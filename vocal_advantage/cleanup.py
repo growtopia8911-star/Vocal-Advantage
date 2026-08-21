@@ -49,6 +49,93 @@ def _pick_from_run(run: list[str]) -> str:
     return run[-1]
 
 
+#: Words that mark a spoken self-correction. What follows one of these is what
+#: the speaker meant; what precedes it is what they are taking back. That is
+#: the whole reason a rule can do this and a model could not: the marker says
+#: which side to keep, so there is nothing to infer and nothing to get
+#: backwards. The AI pass had to guess, and on 2026-08-20 it guessed wrong on
+#: real hardware -- keeping the rejected day and deleting the intended one.
+CORRECTION_MARKERS: frozenset[str] = frozenset({"no", "sorry"})
+
+#: Short replies that follow "no," in ordinary speech and are not corrections.
+#: Without these, "That works. No, thanks." collapses to "That thanks."
+_NOT_A_CORRECTION: frozenset[str] = frozenset(
+    {"thanks", "thank", "please", "sorry", "worries", "problem", "nothing",
+     "never", "nevermind", "really", "yes", "no", "okay", "ok", "yeah", "nope"}
+)
+
+#: A replacement longer than this is a new clause, not a substituted phrase.
+#: "Tuesday, no, Wednesday" is a correction; "Tuesday, no, let us do it at the
+#: end of the week" is someone carrying on talking, and deleting six words to
+#: match it would eat the sentence.
+MAX_CORRECTION_WORDS: int = 3
+
+_SENTENCE_END = (".", "!", "?")
+
+
+def collapse_corrections(text: str) -> str:
+    """Fold "X, no, Y" down to "Y", keeping the rest of the sentence.
+
+        "Let's meet Tuesday, no, Wednesday."  ->  "Let's meet Wednesday."
+
+    Removal only, exactly like the rest of this module: the surviving words are
+    words the speaker actually said, in the order they said them. Nothing is
+    substituted and nothing is invented.
+
+    The marker must have a delimiter **before** it as well as after, which is
+    what separates a correction from the two ordinary uses of "no":
+
+        "No, I do not think that is right."   -- starts the sentence
+        "I told him no, and he left."         -- no delimiter before
+
+    Both are left alone, because in neither case is there a phrase in front of
+    the marker being taken back.
+    """
+    tokens = text.split()
+    if len(tokens) < 3:
+        return text
+
+    for i in range(1, len(tokens) - 1):
+        marker = tokens[i]
+        if not marker.endswith(","):
+            continue
+        if _bare(marker) not in CORRECTION_MARKERS:
+            continue
+        # A delimiter before the marker. Whisper writes a comma when the
+        # speaker runs on and a full stop when they pause; both happen.
+        if not tokens[i - 1].endswith((",",) + _SENTENCE_END):
+            continue
+
+        # The replacement runs to the end of that sentence.
+        replacement: list[str] = []
+        for token in tokens[i + 1:]:
+            replacement.append(token)
+            if token.endswith(_SENTENCE_END):
+                break
+        if not 1 <= len(replacement) <= MAX_CORRECTION_WORDS:
+            continue
+        if any(_bare(w) in _NOT_A_CORRECTION for w in replacement):
+            continue
+
+        # Take back as many words as the replacement supplies: a correction
+        # swaps like for like, so "next Tuesday" is replaced by "next
+        # Wednesday" rather than only the day.
+        start = i - len(replacement)
+        if start < 0:
+            continue
+
+        kept = tokens[:start] + tokens[i + 1:]
+        if not kept:
+            continue
+        # Only if the sentence lost its opening word, and for the same reason
+        # clean_speech does it.
+        if start == 0 and kept[0][:1].islower():
+            kept[0] = kept[0][:1].upper() + kept[0][1:]
+        return " ".join(kept)
+
+    return text
+
+
 def clean_speech(text: str) -> str:
     """Filler words and stutters removed; nothing else touched.
 
@@ -86,7 +173,9 @@ def clean_speech(text: str) -> str:
     if kept[0] != tokens[0] and kept[0][:1].islower():
         kept[0] = kept[0][:1].upper() + kept[0][1:]
 
-    return " ".join(kept)
+    # After the fillers go, so "Tuesday, no, uh, Wednesday" is already
+    # "Tuesday, no, Wednesday" by the time the marker is looked for.
+    return collapse_corrections(" ".join(kept))
 
 
 # ---------------------------------------------------------------------------

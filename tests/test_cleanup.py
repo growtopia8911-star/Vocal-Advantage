@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 
+from vocal_advantage.cleanup import collapse_corrections  # noqa: F401
 from vocal_advantage.cleanup import clean_speech
 
 
@@ -122,3 +123,94 @@ def test_no_word_is_ever_invented():
     said_words = {w.strip(",.?!").lower() for w in said.split()}
     for word in cleaned.split():
         assert word.strip(",.?!").lower() in said_words, word
+
+
+# ---------------------------------------------------------------------------
+# Self-corrections
+#
+# "Tuesday, no, Wednesday" should type Wednesday. The AI pass used to do this
+# and was withdrawn in f26c54d, because on real hardware it collapsed that
+# exact sentence BACKWARDS -- it kept Tuesday, the day Kevin had just rejected,
+# and nothing caught it.
+#
+# A model has to infer which side was meant. A rule does not: the marker says
+# so. Keeping what follows "no" cannot produce the rejected day, which is why
+# this is a rule and not a prompt.
+# ---------------------------------------------------------------------------
+
+
+def test_a_correction_keeps_the_word_after_the_marker():
+    assert clean_speech("Let's meet Tuesday, no, Wednesday.") == "Let's meet Wednesday."
+
+
+def test_the_rejected_word_is_never_the_one_kept():
+    """The specific failure this exists to make impossible."""
+    out = clean_speech("Let's meet Tuesday, no, Wednesday.")
+
+    assert "Wednesday" in out
+    assert "Tuesday" not in out
+
+
+def test_a_full_stop_before_the_marker_works_too():
+    """Whisper writes a comma when the speaker runs on and a full stop when
+    they pause. Kevin's real dictation produced the full stop, so a rule that
+    only handled commas would have missed the case it was built for."""
+    assert clean_speech("Let us meet Tuesday. No, Wednesday.") == "Let us meet Wednesday."
+
+
+def test_a_multi_word_correction_takes_back_the_same_number_of_words():
+    # "next Tuesday" -> "next Wednesday", not "next next Wednesday".
+    assert (clean_speech("Let us meet next Tuesday, no, next Wednesday.")
+            == "Let us meet next Wednesday.")
+
+
+def test_sorry_marks_a_correction_as_well_as_no():
+    assert clean_speech("Ship it Friday, sorry, Thursday.") == "Ship it Thursday."
+
+
+def test_a_filler_inside_the_correction_does_not_break_it():
+    # Fillers are removed first, so the marker and the replacement end up
+    # adjacent by the time this rule looks for them.
+    assert (clean_speech("Let's meet Tuesday, no, uh, Wednesday.")
+            == "Let's meet Wednesday.")
+
+
+def test_no_at_the_start_of_a_sentence_is_not_a_correction():
+    """There is nothing in front of it to take back."""
+    said = "No, I do not think that is right."
+
+    assert clean_speech(said) == said
+
+
+def test_no_without_a_delimiter_before_it_is_not_a_correction():
+    """"I told him no" -- the "no" is what he was told, not a retraction.
+    Collapsing it would delete "him"."""
+    said = "I told him no, and he left."
+
+    assert clean_speech(said) == said
+
+
+def test_a_stock_reply_after_the_marker_is_not_a_correction():
+    """Otherwise "That works. No, thanks." becomes "That thanks."."""
+    said = "That works. No, thanks."
+
+    assert clean_speech(said) == said
+
+
+def test_a_long_tail_after_the_marker_is_left_alone():
+    """Someone carrying on talking, not swapping a phrase. Matching its length
+    would delete most of the sentence."""
+    said = "Let us meet Tuesday, no, let us do it at the end of the week."
+
+    assert clean_speech(said) == said
+
+
+def test_a_correction_never_invents_a_word():
+    """The promise the whole module makes: removal only. Every surviving word
+    must be one the speaker actually said."""
+    said = "Send it to Dave, no, Sarah."
+    out = clean_speech(said)
+
+    said_words = {w.strip(",.").lower() for w in said.split()}
+    for word in out.split():
+        assert word.strip(",.").lower() in said_words
