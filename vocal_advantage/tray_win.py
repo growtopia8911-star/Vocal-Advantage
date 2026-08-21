@@ -26,6 +26,27 @@ except ImportError:  # pragma: no cover - not Windows, or not installed
     pystray = None
 
 
+
+def _click(action):
+    """Wrap a zero-argument action as a pystray menu callback.
+
+    pystray inspects the callback's argument count and accepts only 0, 1 or 2,
+    raising ``ValueError(action)`` for anything else -- and it does so from
+    inside ``Icon.run()``, so it takes the whole app down at startup rather
+    than breaking a single menu item.
+
+    The obvious spelling, ``lambda _icon=None, _item=None, a=action: a()``,
+    binds the action as a *third* parameter. Having a default does not help:
+    ``inspect.signature`` still counts three. A closure keeps the count at two
+    and the action out of the signature entirely.
+    """
+
+    def clicked(_icon=None, _item=None):
+        action()
+
+    return clicked
+
+
 class TrayIcon:
     """The tray presence. `run()` blocks, so it is what the main thread does."""
 
@@ -61,7 +82,7 @@ class TrayIcon:
             items.append(
                 pystray.MenuItem(
                     (lambda _item, t=title: t()) if callable(title) else title,
-                    lambda _icon=None, _item=None, a=action: a(),
+                    _click(action),
                 )
             )
         items += [
