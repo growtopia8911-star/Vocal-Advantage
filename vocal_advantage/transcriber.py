@@ -155,6 +155,11 @@ class Transcriber:
         self.device_in_use: str | None = None
         self.compute_type_in_use: str | None = None
         self._model = None
+        #: (device, compute_type) pairs that loaded but then failed doing real
+        #: work. Loading proves far less than it looks: CTranslate2 accepts
+        #: "cuda" whenever a card is present and only discovers a missing
+        #: CUDA library on the first encode. See _run.
+        self._rejected: set[tuple[str, str]] = set()
 
     # -- model lifecycle ----------------------------------------------------
 
@@ -189,6 +194,8 @@ class Transcriber:
 
         failures: list[str] = []
         for device, compute_type in plan:
+            if (device, compute_type) in self._rejected:
+                continue
             try:
                 model = self.model_factory(self.model_name, device, compute_type)
             except Exception as exc:  # any load failure is a fallback, not a crash
@@ -251,13 +258,47 @@ class Transcriber:
         return kwargs
 
     def _run(self, audio: np.ndarray) -> str:
-        model = self._ensure_model()
-        segments, _info = model.transcribe(
-            normalise_level(audio), **self._transcribe_kwargs()
-        )
-        # The return is a lazy generator -- consume it now or no work happens.
-        segments = list(segments)
-        return assemble_text(segments, on_dropped=self._report_dropped)
+        """Transcribe, demoting the device if it fails while actually working.
+
+        ``_ensure_model``'s ladder only covers *loading*, and loading proves
+        very little: CTranslate2 reports "cuda" as usable whenever a card is
+        present, then raises ``Library cublas64_12.dll is not found`` on the
+        first encode. Anything that ships without the NVIDIA wheels -- the
+        packaged .exe -- hits this on every machine that has a graphics card,
+        and so does any machine whose CUDA libraries are present but
+        unloadable, a mismatched driver being the usual reason.
+
+        Without this, that is a crash on the user's first sentence rather than
+        a slower-but-working app.
+        """
+        for attempt in (1, 2):
+            model = self._ensure_model()
+            device, compute_type = self.device_in_use, self.compute_type_in_use
+            try:
+                segments, _info = model.transcribe(
+                    normalise_level(audio), **self._transcribe_kwargs()
+                )
+                # The return is a lazy generator -- consume it now or no work
+                # happens, and the failure would surface at the caller.
+                segments = list(segments)
+            except Exception as exc:  # noqa: BLE001 - demote, do not crash
+                if attempt == 2 or device == "cpu":
+                    raise
+                print(
+                    f"WARNING: {device} ({compute_type}) loaded but failed "
+                    f"while transcribing: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                print("Falling back to the CPU and retrying.",
+                      file=sys.stderr, flush=True)
+                self._rejected.add((device, compute_type))
+                self._model = None
+                self.device_in_use = None
+                self.compute_type_in_use = None
+                continue
+            return assemble_text(segments, on_dropped=self._report_dropped)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     @staticmethod
     def _report_dropped(seg) -> None:

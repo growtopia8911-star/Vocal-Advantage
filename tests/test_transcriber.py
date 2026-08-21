@@ -526,3 +526,75 @@ def test_the_gain_is_capped():
 
 def test_an_empty_array_is_handled():
     assert normalise_level(np.empty(0, dtype=np.float32)).size == 0
+
+
+# ---------------------------------------------------------------------------
+# Loading the model proves less than it looks
+# ---------------------------------------------------------------------------
+
+
+class LoadsThenFailsModel:
+    """Accepts transcribe(), then blows up when the generator is consumed.
+
+    This is CTranslate2's real behaviour with a missing CUDA library: the
+    model constructs happily, and ``Library cublas64_12.dll is not found``
+    only arrives on the first encode.
+    """
+
+    def __init__(self, error="Library cublas64_12.dll is not found"):
+        self.error = error
+
+    def transcribe(self, audio, **kwargs):
+        def lazy_segments():
+            raise RuntimeError(self.error)
+            yield  # pragma: no cover - never reached, makes this a generator
+
+        return lazy_segments(), object()
+
+
+class FactoryByDevice:
+    """Hands back a different model per device."""
+
+    def __init__(self, per_device):
+        self.per_device = per_device
+        self.calls = []
+
+    def __call__(self, model_name, device, compute_type):
+        self.calls.append((model_name, device, compute_type))
+        return self.per_device[device]
+
+
+def test_a_device_that_fails_while_transcribing_is_demoted_not_fatal(monkeypatch):
+    """The whole reason the packaged .exe is shippable.
+
+    It carries no NVIDIA wheels, so on any machine with a graphics card
+    CTranslate2 says "cuda" is fine and then cannot find cublas. The same
+    happens on a machine whose CUDA libraries are present but unloadable -- a
+    mismatched driver. Before this, that was a crash on the first sentence.
+    """
+    monkeypatch.setattr(transcriber_module.sys, "platform", "win32")
+    good = FakeModel(segments=[FakeSegment(text="It fell back and kept working.")])
+    factory = FactoryByDevice({"cuda": LoadsThenFailsModel(), "cpu": good})
+
+    t = make_transcriber(factory, device="auto")
+    text = t.transcribe(silence(2.0))
+
+    assert text == "It fell back and kept working."
+    assert t.device_in_use == "cpu"
+    # cuda was tried first and is not retried once it has proven itself bad.
+    assert [c[1] for c in factory.calls][0] == "cuda"
+    assert ("cuda", "int8_float16") in t._rejected
+
+
+def test_a_cpu_failure_still_raises(monkeypatch):
+    """Demotion is not a licence to swallow errors. With nowhere left to fall
+    back to, the failure must reach the caller."""
+    monkeypatch.setattr(transcriber_module.sys, "platform", "win32")
+    factory = FactoryByDevice({
+        "cuda": LoadsThenFailsModel(),
+        "cpu": LoadsThenFailsModel("cpu is broken too"),
+    })
+    t = make_transcriber(factory, device="auto")
+
+    with pytest.raises(RuntimeError, match="cpu is broken too"):
+        t.transcribe(silence(2.0))
