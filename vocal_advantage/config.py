@@ -47,15 +47,28 @@ DEFAULTS: dict = {
     "device": "auto",
     "min_duration_s": 0.4,
     "max_duration_s": 300,
+    # How long the hotkey must be held before a release means "stop" rather
+    # than "keep going". Below this a press-and-release toggles recording on,
+    # and a second press turns it off; at or above it the key behaves as
+    # push-to-talk. 0.3s is a claim about a person's hands rather than a fact
+    # about the software, which is exactly why it is a setting.
+    "tap_threshold_s": 0.3,
+    # Trailing silence that auto-stops a recording, so a toggle left on by
+    # accident does not run until the max-duration watchdog notices. 0 disables
+    # it. Silence before you have said anything does not count -- pressing the
+    # key and thinking is normal.
+    "silence_timeout_s": 2.5,
+    # The rolling window transcribed while you are still speaking, and how far
+    # each window reaches back into the one before it. The overlap is what
+    # stops a word landing on a boundary and being heard as half a word twice;
+    # see chunker.py. Longer windows are more accurate (Whisper uses up to 30s
+    # of context) and leave more work for the moment you stop.
+    "chunk_s": 2.0,
+    "overlap_s": 0.25,
     # Filler words and stutters are dropped before anything is typed. Set
     # false for the raw transcript. Not in the original spec: added once a
     # real dictation came back as "Um, so I think we should ship it on
     # Friday." -- Whisper punctuates well but keeps every "um".
-    # macOS only -- Windows types the whole transcript on key release and has
-    # no live preview to switch off. True keeps the behaviour every existing
-    # config already had; set false to keep a bigger model affordable, since
-    # each live pass re-transcribes the sentence from the start.
-    "live_typing": True,
     "clean_speech": True,
     # An extra pass through a local Ollama model (qwen3:4b) that collapses
     # self-corrections and breaks run-on speech into sentences. Off by
@@ -96,7 +109,19 @@ DEFAULTS: dict = {
     # pasted into the wrong window is still recoverable. Never leaves the
     # machine; gitignored.
     "history": True,
+    # Print the per-stage millisecond breakdown after every dictation. On by
+    # default: it is five lines, and "it felt slow" is not diagnosable without
+    # them.
+    "timings": True,
 }
+
+#: Settings that must be a positive number. Zero is rejected for all of them:
+#: a zero chunk length divides by zero, and a zero tap threshold would make
+#: every press a hold and put the toggle out of reach.
+_POSITIVE_NUMBERS: tuple[str, ...] = ("tap_threshold_s", "chunk_s")
+#: Settings that must be a number of zero or more. Zero is meaningful here --
+#: no silence watchdog, and no overlap between windows.
+_NON_NEGATIVE_NUMBERS: tuple[str, ...] = ("silence_timeout_s", "overlap_s")
 
 #: The positions the Flow Bar understands. "bottom-center" is accepted as an
 #: alias and normalised to the British spelling the rest of the project uses --
@@ -157,10 +182,60 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     cfg["flow_bar_position"] = _checked_position(cfg["flow_bar_position"], path)
     cfg["flow_bar_point"] = _checked_point(cfg["flow_bar_point"], path)
     cfg["skip_cleanup_in"] = _checked_skip_list(cfg["skip_cleanup_in"], path)
-    for key in ("sounds", "sound_on_start", "history"):
+    for key in ("sounds", "sound_on_start", "history", "timings"):
         cfg[key] = _checked_bool(key, cfg[key], path)
+    for key in _POSITIVE_NUMBERS:
+        cfg[key] = _checked_number(key, cfg[key], path, minimum=None)
+    for key in _NON_NEGATIVE_NUMBERS:
+        cfg[key] = _checked_number(key, cfg[key], path, minimum=0.0)
+    cfg["overlap_s"] = _checked_overlap(cfg["overlap_s"], cfg["chunk_s"], path)
 
     return cfg
+
+
+def _checked_number(key: str, value: object, path: Path, *, minimum: float | None):
+    """A usable number, or the default with a warning.
+
+    ``minimum=None`` means "must be above zero"; ``minimum=0.0`` means "zero or
+    more". bool is excluded explicitly because it is an int subclass in Python,
+    and `"chunk_s": true` should be rejected rather than read as one second.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        warn(
+            f"WARNING: {path}: {key} must be a number, not {value!r}. "
+            f"Using {DEFAULTS[key]!r} for this run."
+        )
+        return float(DEFAULTS[key])
+    number = float(value)
+    if minimum is None and number <= 0:
+        warn(
+            f"WARNING: {path}: {key} must be greater than zero, not {value!r}. "
+            f"Using {DEFAULTS[key]!r} for this run."
+        )
+        return float(DEFAULTS[key])
+    if minimum is not None and number < minimum:
+        warn(
+            f"WARNING: {path}: {key} cannot be negative. "
+            f"Using {DEFAULTS[key]!r} for this run."
+        )
+        return float(DEFAULTS[key])
+    return number
+
+
+def _checked_overlap(overlap: float, chunk: float, path: Path) -> float:
+    """An overlap shorter than the chunk it sits inside.
+
+    An overlap as long as the window would mean every window contained the
+    previous one whole, and the chunker's cursor would never advance through
+    the audio -- the same two seconds transcribed over and over.
+    """
+    if overlap < chunk:
+        return overlap
+    warn(
+        f"WARNING: {path}: overlap_s ({overlap}) must be shorter than chunk_s "
+        f"({chunk}). Using {DEFAULTS['overlap_s']!r} for this run."
+    )
+    return float(DEFAULTS["overlap_s"])
 
 
 def _checked_bool(key: str, value: object, path: Path) -> bool:

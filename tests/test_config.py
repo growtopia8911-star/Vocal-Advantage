@@ -65,8 +65,14 @@ def test_defaults_has_exactly_the_spec_keys():
         "sounds",
         "sound_on_start",
         "history",
+        # Added by the fast-pipeline rework; "live_typing" went with the live
+        # preview it controlled.
+        "tap_threshold_s",
+        "silence_timeout_s",
+        "chunk_s",
+        "overlap_s",
+        "timings",
         "ai_cleanup",
-        "live_typing",
     }
 
 
