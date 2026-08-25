@@ -203,3 +203,69 @@ def test_a_segment_missing_the_guard_fields_is_kept_not_dropped():
 def test_the_probes_answer_a_bool_on_this_machine_whatever_it_is():
     assert isinstance(has_cuda(), bool)
     assert isinstance(has_mlx(), bool)
+
+
+# --- the VAD that switching engines silently removed ------------------------
+#
+# faster-whisper runs Silero over every utterance (vad_filter=True). mlx-whisper
+# has none, so moving to Metal dropped a preprocessing step worth ~6 points of
+# WER on tests/fixtures/accuracy. apply_vad puts it back.
+
+
+def _speech(seconds: float) -> np.ndarray:
+    t = np.arange(int(seconds * 16000), dtype=np.float32) / 16000
+    return (0.4 * np.sin(2 * np.pi * 220.0 * t)).astype(np.float32)
+
+
+def _silence(seconds: float) -> np.ndarray:
+    return np.zeros(int(seconds * 16000), dtype=np.float32)
+
+
+def test_the_vad_never_raises_and_always_returns_audio():
+    """The contract that matters: this is an improvement, not a dependency."""
+    from vocal_advantage.backends import apply_vad
+
+    out = apply_vad(np.concatenate([_silence(1.0), _speech(1.0), _silence(1.0)]))
+    assert isinstance(out, np.ndarray)
+    assert out.dtype == np.float32
+
+
+def test_the_vad_returns_the_original_when_it_finds_no_speech():
+    """Handing the decoder nothing is far worse than handing it everything."""
+    from vocal_advantage.backends import apply_vad
+
+    clip = _silence(2.0)
+    assert apply_vad(clip).size == clip.size
+
+
+def test_the_vad_handles_empty_audio():
+    from vocal_advantage.backends import apply_vad
+
+    assert apply_vad(np.empty(0, dtype=np.float32)).size == 0
+
+
+def test_a_broken_vad_falls_back_to_the_original_audio(monkeypatch):
+    """A missing or broken faster_whisper must not empty a dictation."""
+    import vocal_advantage.backends as backends_module
+
+    monkeypatch.setattr(backends_module, "_VAD_UNAVAILABLE", False)
+    real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __import__
+
+    def explode(name, *args, **kwargs):
+        if name == "faster_whisper.vad":
+            raise ImportError("no faster_whisper here")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", explode)
+    clip = _speech(1.0)
+    assert backends_module.apply_vad(clip).size == clip.size
+
+
+def test_the_vad_settings_match_what_faster_whisper_is_given():
+    """Both engines must see the same audio or the comparison is meaningless."""
+    from vocal_advantage import backends as b
+    from vocal_advantage.transcriber import Transcriber
+
+    kwargs = Transcriber("small", "cpu", "en", 0.4)._transcribe_kwargs()
+    assert kwargs["vad_parameters"]["min_silence_duration_ms"] == b.VAD_MIN_SILENCE_MS
+    assert kwargs["vad_parameters"]["speech_pad_ms"] == b.VAD_SPEECH_PAD_MS
