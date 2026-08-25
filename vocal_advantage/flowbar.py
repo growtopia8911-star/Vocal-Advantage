@@ -51,6 +51,31 @@ MESSAGE_FRAMES = 90
 MESSAGE_CHAR_WIDTH = 5.5
 MESSAGE_PADDING = 22.0
 
+#: The states that show the legend -- the line saying how to stop and how to
+#: cancel.
+#:
+#: RECORDING only, and the exclusions are each a decision. Not IDLE: the
+#: resting pill is what sits over your work all day, and a standing reminder of
+#: a key you are not currently holding is clutter. Not MESSAGE: "could not
+#: paste" is urgent and a reminder is not. Not TRANSCRIBING either, which is
+#: the one that looks wrong and is not -- once the model has the audio, no key
+#: stops it and none bins the result, so anything the legend said there would
+#: be false.
+LEGEND_STATES = frozenset({RECORDING})
+
+#: Rough advance width of the legend font, in points per character.
+#:
+#: **Deliberately an over-estimate.** This started at 4.6 -- scaled down from
+#: MESSAGE_CHAR_WIDTH because the legend is set smaller -- and that was the
+#: wrong direction: a proportionally *smaller* allowance than the message gets
+#: is how "F8 stops · esc cancels" came out on screen as "F8 stops ·". The
+#: renderer cannot widen the pill at draw time, so anything this does not
+#: allow for is silently cut off at the pill's edge. A few points of slack
+#: shows as a slightly wider gap before the bars, which nobody can see.
+LEGEND_CHAR_WIDTH = 5.4
+#: Between the legend and the bars, so the text does not crowd the trace.
+LEGEND_GAP = 16.0
+
 # --- how bright the pill and its bars are in each state ---------------------
 # The pill brightens slightly while recording; idle is dimmer than everything
 # else because it is what you look at all day.
@@ -91,6 +116,17 @@ def message_width(text: str) -> float:
     )
 
 
+def legend_width(text: str) -> float:
+    """How wide the pill has to be to hold `text` *and* the bars.
+
+    Unlike a message, the legend does not replace the trace -- it sits beside
+    it -- so this is the resting width plus the text, not a maximum of the two.
+    """
+    if not text:
+        return float(wf.PILL_WIDTH)
+    return float(wf.PILL_WIDTH) + LEGEND_GAP + len(text) * LEGEND_CHAR_WIDTH
+
+
 def _ease(current: float, target: float, alpha: float) -> float:
     return current + (target - current) * alpha
 
@@ -106,6 +142,12 @@ class Frame:
     pill_alpha: float
     bar_alpha: float
     text_alpha: float
+    #: How to stop and how to cancel. Empty in every state but RECORDING and
+    #: TRANSCRIBING, so a renderer can draw it unconditionally.
+    #:
+    #: Last, and defaulted, because it is additive: a renderer or a test that
+    #: was building Frames before this existed still builds valid ones.
+    legend: str = ""
 
 
 class Indicator:
@@ -115,13 +157,21 @@ class Indicator:
     Windows-only pill was without the controller noticing.
     """
 
-    def __init__(self, level_source=None, n_bars: int = wf.BAR_COUNT) -> None:
+    def __init__(
+        self,
+        level_source=None,
+        n_bars: int = wf.BAR_COUNT,
+        legend: str = "",
+    ) -> None:
         #: A zero-argument callable returning the current mic RMS, or None.
         #: `Recorder.level` is what production passes. Kept as a callable so
         #: this module never imports the recorder, and so the tests can drive
         #: the whole state machine with a lambda.
         self._level_source = level_source
         self._n_bars = n_bars
+        #: Composed by the caller, because the hotkey it names lives in
+        #: main.py and this module deliberately knows nothing about hotkeys.
+        self._legend = legend
 
         self._commands: "queue.Queue[tuple[str, str]]" = queue.Queue()
         self._mode = IDLE
@@ -185,10 +235,11 @@ class Indicator:
 
         self._heights = self._advance_wave()
 
+        legend = self._legend if self._mode in LEGEND_STATES else ""
         target_width = (
             message_width(self._text)
             if self._mode == MESSAGE
-            else float(wf.PILL_WIDTH)
+            else legend_width(legend)
         )
         self._width = _ease(self._width, target_width, FADE_ALPHA)
         self._pill_alpha = _ease(
@@ -206,6 +257,7 @@ class Indicator:
             state=self._mode,
             heights=self._heights,
             text=self._text if self._mode == MESSAGE else "",
+            legend=legend,
             width=self._width,
             pill_alpha=self._pill_alpha,
             bar_alpha=self._bar_alpha,

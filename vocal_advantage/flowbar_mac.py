@@ -72,6 +72,7 @@ NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0
 NSWindowCollectionBehaviorStationary = 1 << 4
 NSWindowCollectionBehaviorIgnoresCycle = 1 << 6
 NSApplicationActivationPolicyAccessory = 1
+NSTextAlignmentLeft = 0
 NSTextAlignmentCenter = 2
 
 # --- palette ----------------------------------------------------------------
@@ -93,6 +94,10 @@ MOVE_OUTLINE_WIDTH = 2.0
 FPS = 60
 SIDE_MARGIN = 24        # from the screen edge, for the left/right positions
 MESSAGE_FONT_SIZE = 10.0
+#: Smaller than a message: a standing reminder, not an announcement.
+LEGEND_FONT_SIZE = 9.5
+#: From the pill's left edge. Comfortably inside the rounded end.
+LEGEND_PAD_X = 12.0
 
 POSITIONS = ("bottom-centre", "bottom-left", "bottom-right")
 
@@ -205,6 +210,8 @@ class _FlowBarView(NSView):
 
         if data.bar_alpha > 0.01:
             self._draw_bars(data, width, height)
+        if data.legend and data.bar_alpha > 0.01:
+            self._draw_legend(data, width, height)
         if data.text and data.text_alpha > 0.01:
             self._draw_message(data, width, height)
         if getattr(self, "_movable", False):
@@ -229,7 +236,14 @@ class _FlowBarView(NSView):
     def _draw_bars(self, data, width: float, height: float) -> None:
         centre_y = height / 2.0
         max_half = height / 2.0 - wf.BAR_MARGIN_Y
-        xs = wf.bar_layout(width, len(data.heights))
+        # With a legend the trace keeps its resting width and moves to the
+        # right-hand end, so the text gets the space the pill grew by and the
+        # bars stay exactly the size they are at rest. Laying them out across
+        # the whole widened pill instead would stretch the trace every time a
+        # recording started, which reads as the waveform changing shape.
+        bars_width = float(wf.PILL_WIDTH) if data.legend else width
+        offset = width - bars_width
+        xs = [x + offset for x in wf.bar_layout(bars_width, len(data.heights))]
 
         bar_red, bar_green, bar_blue = BAR_RGB
         NSColor.colorWithCalibratedRed_green_blue_alpha_(
@@ -250,6 +264,33 @@ class _FlowBarView(NSView):
             NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
                 bar, wf.BAR_WIDTH / 2.0, wf.BAR_WIDTH / 2.0
             ).fill()
+
+    def _draw_legend(self, data, width: float, height: float) -> None:
+        """The hotkey reminder, left-aligned in the space the pill grew by.
+
+        Grey rather than black: it is a standing reminder sitting next to the
+        thing you are actually watching, and at full ink it would compete with
+        the trace. Alpha rides `bar_alpha` so it fades in with the bars instead
+        of needing a channel of its own.
+        """
+        style = NSMutableParagraphStyle.alloc().init()
+        style.setAlignment_(NSTextAlignmentLeft)
+        attributes = {
+            NSFontAttributeName: NSFont.systemFontOfSize_(LEGEND_FONT_SIZE),
+            NSForegroundColorAttributeName:
+                NSColor.colorWithCalibratedWhite_alpha_(0.34, data.bar_alpha),
+            NSParagraphStyleAttributeName: style,
+        }
+        text = NSString.stringWithString_(data.legend)
+        size = text.sizeWithAttributes_(attributes)
+        available = max(0.0, width - float(wf.PILL_WIDTH) - LEGEND_PAD_X)
+        text.drawInRect_withAttributes_(
+            NSMakeRect(
+                LEGEND_PAD_X, (height - size.height) / 2.0,
+                available, size.height,
+            ),
+            attributes,
+        )
 
     def _draw_message(self, data, width: float, height: float) -> None:
         style = NSMutableParagraphStyle.alloc().init()

@@ -29,7 +29,7 @@ from vocal_advantage.config import CONFIG_PATH, load_config, save_config
 # Re-exported so `main.say(...)` reads as intended; the implementation lives in
 # console.py so config.py can use it without an import cycle.
 from vocal_advantage.console import say, warn
-from vocal_advantage.controller import DictationController
+from vocal_advantage.controller import CANCEL_KEY, DictationController
 from vocal_advantage.dictionary import DICTIONARY_PATH, load_dictionary
 from vocal_advantage.frontmost import frontmost_app, matches
 from vocal_advantage.history import HISTORY_PATH, History
@@ -745,6 +745,27 @@ class _EmptyDictionary:
         return text
 
 
+def legend_for(spec: HotkeySpec) -> str:
+    """What the Flow Bar says while it is recording.
+
+    Composed here rather than in `flowbar.py`, which deliberately knows nothing
+    about hotkeys -- it is handed a finished string and carries it.
+
+    Both halves name the key that performs the action, because that is the one
+    habit worth taking from the researched app: a control and its key sit
+    together, permanently, rather than the key living in a settings pane the
+    user has to go and look at. Until now the hotkey appeared nowhere on screen
+    at all and was knowable only from the README.
+
+    The `esc` half is dropped when esc *is* the hotkey. `_handle_down` gives the
+    hotkey precedence there, so advertising a cancel that cannot happen would
+    make the bar lie about the one thing it is on screen to say.
+    """
+    if CANCEL_KEY in spec.keys:
+        return "%s stops" % spec
+    return "%s stops · %s cancels" % (spec, CANCEL_KEY)
+
+
 def _make_flow_bar(cfg: dict, indicator):
     """The overlay, or None if it is switched off or refuses to start.
 
@@ -920,6 +941,12 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     # The level tap the waveform reads. A plain float on the recorder, written
     # by PortAudio's thread and read here lock-free -- there is no second
     # microphone stream anywhere in this project.
+    #
+    # No legend here, deliberately. `flowbar_win.render_frame` draws no text --
+    # there is no font in that file, `frame.text` is dropped, and flash
+    # messages have never reached the Windows bar either. Passing one would
+    # widen the pill and stretch the trace to display nothing. It goes back in
+    # the moment that renderer can draw a string.
     indicator = Indicator(level_source=lambda: recorder.level)
 
     dictionary = _load_dictionary()
@@ -1074,7 +1101,9 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     # The level tap the waveform reads: a plain float on the recorder, written
     # by PortAudio's thread and read lock-free by the renderer. No second
     # microphone stream.
-    indicator = Indicator(level_source=lambda: recorder.level)
+    indicator = Indicator(
+        level_source=lambda: recorder.level, legend=legend_for(spec)
+    )
 
     dictionary = _load_dictionary()
     player = _make_player(cfg)
