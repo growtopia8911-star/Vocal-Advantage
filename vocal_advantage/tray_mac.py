@@ -26,6 +26,7 @@ from __future__ import annotations
 import io
 
 from vocal_advantage.console import warn
+from vocal_advantage.flowbar import IDLE
 from vocal_advantage.tray_icon import make_icon
 
 try:  # pragma: no cover - absence is only reachable off macOS
@@ -34,13 +35,17 @@ try:  # pragma: no cover - absence is only reachable off macOS
         NSImage,
         NSMenu,
         NSMenuItem,
+        NSRunLoop,
+        NSRunLoopCommonModes,
         NSStatusBar,
+        NSTimer,
         NSVariableStatusItemLength,
     )
     from Foundation import NSData, NSObject
 except ImportError:  # pragma: no cover - not macOS
     objc = None
-    NSImage = NSMenu = NSMenuItem = NSStatusBar = None
+    NSImage = NSMenu = NSMenuItem = NSStatusBar = NSTimer = None
+    NSRunLoop = NSRunLoopCommonModes = None
     NSVariableStatusItemLength = -1
     NSData = None
     NSObject = object
@@ -49,26 +54,36 @@ except ImportError:  # pragma: no cover - not macOS
 #: own items use, and the icon is drawn at 4x and downscaled so it stays crisp.
 ICON_POINTS = 18
 
+#: Seconds between status-dot checks. State changes are human-paced -- a key
+#: going down, a model finishing -- so eight times a second is already finer
+#: than anyone can perceive, and each tick is one string comparison that
+#: usually does nothing at all.
+TICK_S = 0.12
 
-def _ns_image(size: int = ICON_POINTS) -> NSImage:
-    """The generated icon as a template NSImage.
+
+def _ns_image(size: int = ICON_POINTS, state: str = IDLE) -> NSImage:
+    """The generated icon as an NSImage, template only when it can be one.
 
     PNG in memory rather than a file on disk: the icon is generated precisely so
     that no binaries live in the repository, and writing one to a temp file to
     read it straight back would give that up for nothing.
+
+    **`setTemplate_` is conditional, and that is the whole trick.** A template
+    image is black-plus-alpha and macOS recolours all of it for the current
+    menu-bar appearance -- which is why the idle icon is correct on a light bar
+    and a dark one with nothing to detect, and equally why a status colour put
+    into one would be flattened away. So the working states ship as ordinary
+    images carrying their own contrast, exactly as the Windows icon always has.
     """
     buffer = io.BytesIO()
     # Drawn at 2x for Retina; setSize_ below tells AppKit the point size, and it
     # picks the pixels up as a @2x representation.
-    make_icon(size * 2, template=True).save(buffer, format="PNG")
+    make_icon(size * 2, template=True, state=state).save(buffer, format="PNG")
     image = NSImage.alloc().initWithData_(
         NSData.dataWithBytes_length_(buffer.getvalue(), len(buffer.getvalue()))
     )
     image.setSize_((size, size))
-    # The whole reason this file is not pystray: macOS recolours a template
-    # image for the current menu-bar appearance, so dark and light are both
-    # correct without detecting either.
-    image.setTemplate_(True)
+    image.setTemplate_(state == IDLE)
     return image
 
 
@@ -88,7 +103,40 @@ class _TrayTarget(NSObject):
         self._actions = []
         self._titles = []
         self._items = []
+        self._button = None
+        self._drawn_state = IDLE
         return self
+
+    def setButton_(self, button) -> None:
+        self._button = button
+
+    def tick_(self, _timer) -> None:
+        """Repaint the icon when, and only when, the state has actually moved.
+
+        A pull on a timer rather than a push from the Indicator, because the
+        Indicator is written to be callable from any thread and AppKit is not:
+        a push would have to hop threads to get here. Comparing one string
+        eight times a second is cheaper than that machinery.
+
+        The docstring on `menuNeedsUpdate_` argues against exactly this for the
+        status *line*, and it is still right about that -- nobody is looking at
+        a string inside a closed menu. The dot is the opposite case: it is on
+        screen the whole time, and the state it fails to show is "your
+        microphone is open".
+        """
+        if self._button is None:
+            return
+        try:
+            state = self._indicator.state_name()
+        except Exception:  # noqa: BLE001 - the icon must not take the app down
+            return
+        if state == self._drawn_state:
+            return
+        self._drawn_state = state
+        try:
+            self._button.setImage_(_ns_image(state=state))
+        except Exception:  # noqa: BLE001 - as above
+            warn("Could not update the menu bar icon.")
 
     def setStatusMenuItem_(self, item) -> None:
         self._status_item = item
@@ -141,6 +189,7 @@ class TrayIcon:
         self._extra = [(t, a) for t, a in items if a is not None]
         self._item = None
         self._target = None
+        self._timer = None
 
     def start(self) -> None:
         self._target = _TrayTarget.alloc().initWithIndicator_onQuit_(
@@ -152,6 +201,7 @@ class TrayIcon:
         )
         self._item.button().setImage_(_ns_image())
         self._item.button().setToolTip_("Vocal Advantage")
+        self._target.setButton_(self._item.button())
 
         menu = NSMenu.alloc().init()
         menu.setDelegate_(self._target)
@@ -189,10 +239,30 @@ class TrayIcon:
 
         self._item.setMenu_(menu)
 
+        # NSRunLoopCommonModes, not the default mode: an open menu puts the run
+        # loop into tracking mode, and a default-mode timer stops firing there.
+        # The dot would then freeze for exactly as long as the menu is open,
+        # which is precisely when someone is looking at it.
+        self._timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+            TICK_S, self._target, "tick:", None, True
+        )
+        NSRunLoop.currentRunLoop().addTimer_forMode_(
+            self._timer, NSRunLoopCommonModes
+        )
+
     def stop(self) -> None:
         """Take the icon out of the menu bar. Safe to call twice."""
         if self._item is None:
             return
+        # Invalidated first. A repeating NSTimer holds a strong reference to its
+        # target and goes on firing after the status item is gone, which would
+        # leave it painting a button that is no longer in the menu bar.
+        if self._timer is not None:
+            try:
+                self._timer.invalidate()
+            except Exception:  # noqa: BLE001 - shutting down regardless
+                pass
+            self._timer = None
         try:
             NSStatusBar.systemStatusBar().removeStatusItem_(self._item)
         except Exception:  # noqa: BLE001 - shutting down regardless

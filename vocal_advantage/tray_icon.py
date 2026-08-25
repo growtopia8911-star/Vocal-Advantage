@@ -47,6 +47,29 @@ TEMPLATE_BLACK = (0, 0, 0, 255)
 #: How far the Windows outline extends past the glyph, as a fraction of size.
 OUTLINE_FRACTION = 0.055
 
+#: The state dot's colours, keyed by `flowbar`'s own state names so the two
+#: cannot drift apart. Idle is absent on purpose -- doing nothing is the state
+#: the icon sits in all day and it earns no mark.
+#:
+#: Matched to the recording window's own vocabulary: red while the microphone
+#: is open, blue while the model is working, amber for something that wants a
+#: look. Red is the only one that has to be unmistakable, because it is the one
+#: that means a microphone is live.
+STATE_DOTS = {
+    "recording": (232, 62, 54),
+    "transcribing": (10, 132, 255),
+    "message": (255, 168, 38),
+}
+
+#: Fractions of the icon. Big enough to survive being resampled down to the
+#: 16px the menu bar may ask for, and pushed into the lower-right corner so it
+#: sits clear of the glyph's tallest bar.
+DOT_RADIUS_FRACTION = 0.20
+DOT_CENTRE_FRACTION = 0.76
+#: A dark rim, so the dot separates from the light glyph behind it and from a
+#: pale menu bar underneath.
+DOT_RIM_FRACTION = 0.035
+
 #: Drawn at this multiple and scaled down. Pillow has no antialiasing of its
 #: own, so without it the round caps come out as staircases at 22px.
 SUPERSAMPLE = 4
@@ -70,18 +93,33 @@ def _bar_boxes(size: int) -> list[tuple[float, float, float, float]]:
     return boxes
 
 
-def make_icon(size: int = ICON_SIZE, *, template: bool = False) -> Image.Image:
+def make_icon(
+    size: int = ICON_SIZE, *, template: bool = False, state: str | None = None
+) -> Image.Image:
     """The icon as an RGBA image with transparent corners.
 
     `template=True` gives macOS its black-plus-alpha template image.
     `template=False` gives Windows a light glyph on a dark outline.
+
+    `state` adds the status dot, and **overrides `template`** rather than
+    combining with it. That is not a convenience: a template image is
+    black-plus-alpha and macOS recolours the whole of it for the current
+    menu-bar appearance, so a colour put into one is flattened away. An icon
+    that carries a state colour therefore cannot be a template, and having
+    stopped being one it has to carry its own contrast -- which is exactly what
+    the Windows glyph already does, so a state icon is that glyph plus the dot
+    on both platforms.
+
+    Idle is not a state here. It has no dot, stays a template on macOS, and is
+    byte-for-byte the icon that shipped.
     """
     big = size * SUPERSAMPLE
     image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     boxes = _bar_boxes(big)
+    dot = STATE_DOTS.get(state or "")
 
-    if template:
+    if template and dot is None:
         for box in boxes:
             _capsule(draw, box, TEMPLATE_BLACK)
     else:
@@ -95,7 +133,29 @@ def make_icon(size: int = ICON_SIZE, *, template: bool = False) -> Image.Image:
         for box in boxes:
             _capsule(draw, box, GLYPH_LIGHT)
 
-    return _mirrored(image).resize((size, size), Image.LANCZOS)
+    image = _mirrored(image)
+    # After the mirroring, never before. `_mirrored` copies the top half over
+    # the bottom, so a dot drawn into one corner beforehand comes back as two.
+    if dot is not None:
+        _dot(image, big, dot)
+    return image.resize((size, size), Image.LANCZOS)
+
+
+def _dot(image: Image.Image, big: int, colour) -> None:
+    """The status blob, lower-right, with a dark rim to lift it off the glyph."""
+    radius = big * DOT_RADIUS_FRACTION
+    centre = big * DOT_CENTRE_FRACTION
+    rim = big * DOT_RIM_FRACTION
+    draw = ImageDraw.Draw(image)
+    draw.ellipse(
+        (centre - radius - rim, centre - radius - rim,
+         centre + radius + rim, centre + radius + rim),
+        fill=GLYPH_DARK,
+    )
+    draw.ellipse(
+        (centre - radius, centre - radius, centre + radius, centre + radius),
+        fill=colour + (255,),
+    )
 
 
 def _mirrored(image: Image.Image) -> Image.Image:

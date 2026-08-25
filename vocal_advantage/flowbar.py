@@ -142,8 +142,8 @@ class Frame:
     pill_alpha: float
     bar_alpha: float
     text_alpha: float
-    #: How to stop and how to cancel. Empty in every state but RECORDING and
-    #: TRANSCRIBING, so a renderer can draw it unconditionally.
+    #: How to stop and how to cancel. Empty in every state but RECORDING, so a
+    #: renderer can draw it unconditionally.
     #:
     #: Last, and defaulted, because it is additive: a renderer or a test that
     #: was building Frames before this existed still builds valid ones.
@@ -183,6 +183,11 @@ class Indicator:
         # and a queue-derived status would leave the tray permanently stuck on
         # "Idle" while dictation worked perfectly.
         self._status = STATUS_TEXT[IDLE]
+        #: The raw state, tracked beside `_status` and for the same reason: the
+        #: tray reads it, and with `flow_bar: false` nothing ever drains the
+        #: queue. `status_text` cannot serve here because it maps MESSAGE onto
+        #: "Idle" -- right for a menu line, wrong for a coloured dot.
+        self._state_name = IDLE
 
         self._wave = wf.ScrollingWave(n_bars)
         self._heights = wf.idle_heights(n_bars)
@@ -195,15 +200,18 @@ class Indicator:
 
     def show_recording(self) -> None:
         self._status = STATUS_TEXT[RECORDING]
+        self._state_name = RECORDING
         self._commands.put((RECORDING, ""))
 
     def show_processing(self) -> None:
         self._status = STATUS_TEXT[TRANSCRIBING]
+        self._state_name = TRANSCRIBING
         self._commands.put((TRANSCRIBING, ""))
 
     def hide(self) -> None:
         """Go quiet. The bar stays on screen; this is the idle state."""
         self._status = STATUS_TEXT[IDLE]
+        self._state_name = IDLE
         self._commands.put((IDLE, ""))
 
     def flash(self, message: str) -> None:
@@ -213,7 +221,12 @@ class Indicator:
         before it can be read. `controller.py` already gets this right.
         """
         self._status = STATUS_TEXT[MESSAGE]
+        self._state_name = MESSAGE
         self._commands.put((MESSAGE, message))
+
+    def state_name(self) -> str:
+        """The raw state, for the tray's status dot. Safe from any thread."""
+        return self._state_name
 
     def status_text(self) -> str:
         """The tray's status line. Safe to call from the tray's thread."""
