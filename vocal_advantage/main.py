@@ -795,6 +795,32 @@ def _make_flow_bar(cfg: dict, indicator):
         return None
 
 
+def _settings_opener(config_path: Path):
+    """The "Settings..." action, or None where there is no window to open.
+
+    None rather than a stub, because `_menu_items` drops an item whose action
+    is None -- so Windows simply does not offer it, instead of offering
+    something that prints an apology. Same rule "Move bar" already follows when
+    there is no bar.
+
+    WebKit is imported inside the click, not at module scope: it costs real
+    time to load and most launches never open this window.
+    """
+    if sys.platform != "darwin":
+        return None
+
+    def open_it() -> None:
+        try:
+            from vocal_advantage.settings_mac import open_settings
+
+            open_settings(config_path)
+        except Exception:  # noqa: BLE001 - a menu click must not end the app
+            warn("The settings window could not be opened.")
+            warn(traceback.format_exc())
+
+    return open_it
+
+
 def _menu_items(bar, changer, config_path: Path):
     """The (title, action) pairs between the status line and Quit.
 
@@ -805,6 +831,7 @@ def _menu_items(bar, changer, config_path: Path):
     """
     toggle_move, is_movable = _move_mode(bar, config_path)
     return [
+        ("Settings...", _settings_opener(config_path)),
         (
             (lambda: "Lock bar in place" if is_movable() else "Move bar")
             if is_movable

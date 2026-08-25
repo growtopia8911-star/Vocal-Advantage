@@ -35,6 +35,16 @@ dependencies = [
     # macOS only. The event tap for the key hook and CGEvent/NSPasteboard
     # for the paste. 6.9 MB. Not installed on Windows.
     "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+    # Accessibility, for confirming a paste actually landed. macOS reports
+    # nothing about injected keystrokes, so without this a paste into a window
+    # that refused it looks exactly like one that worked. See ax_text.py.
+    "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+    # The settings window. WKWebView hosts the page in a real NSWindow, so the
+    # design is written once instead of being hand-built twice in two native
+    # widget toolkits. 50 KB -- it is a thin wrapper over the WebKit already in
+    # macOS, not a browser. There is no server and nothing listens on a port:
+    # the page talks to Python over WKWebView's script message bridge.
+    "pyobjc-framework-WebKit; sys_platform == 'darwin'",
     "numpy",
     # The tray icon and the Windows overlay are both drawn at runtime with
     # Pillow, which is what keeps image files out of the repository. Needed on
