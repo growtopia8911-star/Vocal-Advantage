@@ -198,3 +198,88 @@ def test_a_backend_with_no_get_clipboard_still_pastes():
 
     b = NoReader()
     assert paste_with("dictated text", b, CHORD) is True
+
+
+# --- the restore moved off the critical path --------------------------------
+#
+# Waiting 250ms for the receiving app to read the clipboard before handing the
+# user's own contents back was, measured on a real dictation, over half of the
+# insertion stage and about a third of the entire post-release wait. The wait
+# is still needed -- restoring too early races the paste and puts the OLD
+# clipboard into the document -- but nothing needs to *block* on it.
+
+
+def inline(fn):
+    """A scheduler that runs the restore synchronously, for tests."""
+    fn()
+
+
+def test_the_paste_returns_before_the_restore_has_happened():
+    """The point of the change: the caller is not billed for the wait."""
+    b = FakeBackend()
+    pending = []
+    assert paste_with("dictated", b, CHORD, schedule=pending.append) is True
+    assert b.clipboard == "dictated", "restore should not have run yet"
+    assert len(pending) == 1, "a restore should have been scheduled"
+    pending[0]()
+    assert b.clipboard == "previous contents"
+
+
+def test_the_blocking_wait_is_no_longer_paid_by_the_caller():
+    b = FakeBackend()
+    paste_with("dictated", b, CHORD, schedule=lambda fn: None)
+    # settle 0.1 + three key intervals 0.06 + post-paste 0.06 = 0.22
+    assert b.slept == pytest.approx(0.22, abs=0.001)
+
+
+def test_the_restore_still_waits_before_putting_the_clipboard_back():
+    """Moved off the critical path, not removed. Restoring early races the app."""
+    b = FakeBackend()
+    pending = []
+    paste_with("dictated", b, CHORD, schedule=pending.append)
+    before = b.slept
+    pending[0]()
+    assert b.slept - before == pytest.approx(0.25, abs=0.001)
+
+
+def test_a_later_paste_wins_the_clipboard():
+    """Two dictations in quick succession must not resurrect the older one.
+
+    The first restore fires while the second paste has already written its own
+    text. Restoring blindly would wipe the newer dictation off the clipboard.
+    """
+    b = FakeBackend(clipboard="original")
+    first: list = []
+    paste_with("first dictation", b, CHORD, schedule=first.append)
+    second: list = []
+    paste_with("second dictation", b, CHORD, schedule=second.append)
+    first[0]()   # the stale restore, arriving late
+    assert b.clipboard == "second dictation", "a stale restore clobbered a newer paste"
+    second[0]()  # the current one
+    assert b.clipboard == "original"
+
+
+def test_a_refused_chord_still_schedules_the_restore():
+    b = FakeBackend(chord_refused=True)
+    pending = []
+    assert paste_with("dictated", b, CHORD, schedule=pending.append) is False
+    assert len(pending) == 1
+    pending[0]()
+    assert b.clipboard == "previous contents"
+
+
+def test_nothing_is_scheduled_when_the_clipboard_was_never_written():
+    b = FakeBackend(set_fails=99)
+    pending = []
+    paste_with("dictated", b, CHORD, schedule=pending.append)
+    assert pending == []
+
+
+def test_the_default_scheduler_does_not_block_the_caller():
+    """With no scheduler passed, the real one is a daemon thread."""
+    import threading
+
+    b = FakeBackend()
+    before = threading.active_count()
+    paste_with("dictated", b, CHORD)
+    assert threading.active_count() >= before

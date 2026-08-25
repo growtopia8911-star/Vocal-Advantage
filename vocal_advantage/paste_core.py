@@ -145,8 +145,62 @@ def restore_clipboard(backend, saved: str | None) -> None:
         pass
 
 
+#: Guards the two lines below. Held only to read/write them, never across a
+#: sleep or an OS call.
+_restore_lock = threading.Lock()
+#: Bumped by every paste. A restore that finds the counter has moved on knows a
+#: newer dictation owns the clipboard now and quietly does nothing.
+_paste_generation = 0
+#: What the user actually had, while a restore is still owed. Dictate twice in
+#: quick succession and the second paste reads a clipboard holding the *first
+#: dictation's* text -- preserving that would hand the user their own transcript
+#: back instead of what they had copied. So while a restore is pending, the
+#: pending value is carried forward rather than re-read. The blocking version of
+#: this code could not hit the problem, because the restore always finished
+#: before the next paste began.
+_pending_saved: str | None = None
+_restore_pending = False
+
+
+def _spawn(work) -> None:
+    """Run the restore on a daemon thread, so the dictation does not wait.
+
+    Daemon on purpose: a restore in flight must never hold the app open at
+    shutdown. Losing it costs the user a clipboard they can re-copy; a process
+    that will not quit costs them a Force Quit.
+    """
+    threading.Thread(target=work, name="clipboard-restore", daemon=True).start()
+
+
+def restore_clipboard_later(backend, saved: str | None, generation: int) -> None:
+    """Wait for the app to take the text, then put the clipboard back.
+
+    The wait is still necessary -- apps fetch the clipboard lazily and some do
+    it well after the keystroke, so restoring immediately races the paste and
+    puts the *old* clipboard into the document. What changed is who pays for
+    it: this runs off the critical path, so the user's dictation is finished
+    while the wait happens.
+
+    The generation check is what makes that safe. Dictate twice quickly and the
+    first restore comes due after the second paste has already written its own
+    text; restoring blindly would wipe the newer dictation off the clipboard.
+    """
+    global _restore_pending
+
+    backend.sleep(CLIPBOARD_RESTORE_S)
+    with _restore_lock:
+        if generation != _paste_generation:
+            return  # a newer paste owns the clipboard; its restore will run
+        _restore_pending = False
+    restore_clipboard(backend, saved)
+
+
 def paste_with(
-    text: str, backend: PasteBackend, chord: Iterable[tuple[int, bool]]
+    text: str,
+    backend: PasteBackend,
+    chord: Iterable[tuple[int, bool]],
+    *,
+    schedule=_spawn,
 ) -> bool:
     """Put text on the clipboard, paste it, and put the clipboard back.
 
@@ -163,13 +217,25 @@ def paste_with(
     if not text.strip():
         return False
 
+    global _paste_generation, _pending_saved, _restore_pending
+
     injection_active.set()
     saved: str | None = None
+    generation = 0
     wrote_clipboard = False
     try:
         wait_for_modifier_release(backend)
-        # Read before writing, or there is nothing left to read (10c).
-        saved = read_clipboard(backend)
+        # Read before writing, or there is nothing left to read (10c). Outside
+        # the lock: this is an OS call and the lock guards two variables.
+        current = read_clipboard(backend)
+        with _restore_lock:
+            _paste_generation += 1
+            generation = _paste_generation
+            # If a restore is still owed, the clipboard currently holds our own
+            # previous transcript -- carry the real value forward instead.
+            saved = _pending_saved if _restore_pending else current
+            _pending_saved = saved
+            _restore_pending = True
         if not set_clipboard_with_retry(backend, text):
             return False
         wrote_clipboard = True
@@ -178,13 +244,12 @@ def paste_with(
         # Keep the guard up a little longer so the hotkey hook sees and drops
         # our own injected key events before it starts listening again.
         backend.sleep(POST_PASTE_S)
-        # Then give the receiving app time to actually fetch what we wrote,
-        # before it is taken away again.
-        backend.sleep(CLIPBOARD_RESTORE_S)
         return pasted
     finally:
         if wrote_clipboard:
-            restore_clipboard(backend, saved)
+            # Off the critical path: the dictation is done, and the wait for
+            # the receiving app to take the text happens on its own thread.
+            schedule(lambda: restore_clipboard_later(backend, saved, generation))
         # Always, even on an unexpected exception: a stuck flag would make the
         # hotkey stop working entirely until restart.
         injection_active.clear()
