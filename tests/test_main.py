@@ -1472,3 +1472,76 @@ def test_raw_mode_still_means_raw_in_a_skipped_app():
     clean = va_main._cleaner(cfg)
     with mock.patch.object(va_main, "frontmost_app", lambda: "Terminal"):
         assert clean("um git status") == "um git status"
+
+
+# --------------------------------------------------------------------------
+# The paster protocol, checked at wiring time
+# --------------------------------------------------------------------------
+#
+# This exists because of a bug that reached a real dictation: _run_app_mac
+# passed `paste_mac.paste_text` (the function) where the paster protocol wants
+# an object with a `.paste_text` method. The controller caught the resulting
+# AttributeError, flashed "could not paste", and printed a timing report that
+# looked entirely healthy apart from a suspiciously fast insertion stage.
+#
+# The launchers are not covered end to end -- every test that drives them stops
+# at the model load -- so the wiring itself has to be self-checking.
+
+
+def test_recording_paster_rejects_a_bare_function():
+    """The exact mistake: the function, not the module that contains it."""
+    from vocal_advantage import paste_mac
+
+    with pytest.raises(TypeError, match="paste_text"):
+        va_main.RecordingPaster(paste_mac.paste_text, _Paster())
+
+
+def test_recording_paster_accepts_a_module_with_a_module_level_paste_text():
+    from vocal_advantage import paste_mac, paste_win
+
+    va_main.RecordingPaster(paste_mac, _Paster())
+    va_main.RecordingPaster(paste_win, _Paster())
+
+
+def test_recording_paster_accepts_an_ordinary_object():
+    va_main.RecordingPaster(_Paster(), _Paster())
+
+
+@pytest.mark.parametrize("platform_name", ["darwin", "win32"])
+def test_each_launcher_wires_a_usable_paster(platform_name, tmp_path, monkeypatch):
+    """Catch a miswired paster on either platform without a real dictation.
+
+    The launcher is stopped at the model load, which is *after* the paster is
+    built -- so reaching the stop proves RecordingPaster's check passed on
+    whatever that platform hands it.
+    """
+    monkeypatch.setattr(va_main.sys, "platform", platform_name)
+
+    class StopAfterWiring(Exception):
+        pass
+
+    built: list = []
+    real = va_main.RecordingPaster
+
+    def spy(inner, history):
+        built.append(inner)
+        return real(inner, history)
+
+    monkeypatch.setattr(va_main, "RecordingPaster", spy)
+
+    def stop():
+        raise StopAfterWiring
+
+    # The paster is built in the controller call, which is after this point on
+    # macOS and before it on Windows -- so stop at the paste instead.
+    monkeypatch.setattr(va_main, "_build_controller", lambda *a, **k: stop())
+
+    launcher = va_main._run_app_mac if platform_name == "darwin" else (
+        va_main._run_app_windows
+    )
+    with pytest.raises(StopAfterWiring):
+        launcher(tmp_path / "config.json")
+
+    assert built, "no paster was constructed"
+    for inner in built:
+        assert callable(getattr(inner, "paste_text", None)), inner

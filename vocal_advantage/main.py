@@ -554,6 +554,18 @@ class RecordingPaster:
     """
 
     def __init__(self, inner, history) -> None:
+        # Checked here, at wiring time, because the alternative is silence.
+        # Handing this the *function* paste_mac.paste_text instead of the
+        # module makes `inner.paste_text` an AttributeError -- which the
+        # controller catches, turns into "could not paste", and reports as a
+        # failed dictation. Every dictation, with a plausible-looking timing
+        # report and no traceback anywhere. It shipped exactly once.
+        if not callable(getattr(inner, "paste_text", None)):
+            raise TypeError(
+                f"paster must be an object with a paste_text(str) -> bool "
+                f"method, not {inner!r}. A module with a module-level "
+                f"paste_text satisfies this; the bare function does not."
+            )
         self._inner = inner
         self._history = history
 
@@ -1091,7 +1103,10 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         cfg, spec,
         recorder=recorder,
         transcriber=transcriber,
-        paster=RecordingPaster(paste_mac.paste_text, history),
+        # The module, not paste_mac.paste_text: the paster protocol is an
+        # object with a .paste_text(str) -> bool, and a module-level function
+        # of that name is exactly what satisfies it -- same as paste_win above.
+        paster=RecordingPaster(paste_mac, history),
         indicator=SoundingIndicator(indicator, player),
         dictionary=dictionary,
     )
