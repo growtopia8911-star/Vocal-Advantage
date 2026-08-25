@@ -82,18 +82,28 @@ Numbered so a test or a hand-check can name one.
 ### 1. Flow Bar control strip — BUILT + small addition
 
 - [ ] 1a. The strip shows the active profile name.
-- [ ] 1b. It shows the current hotkey rendered as a key cap, not prose.
-- [ ] 1c. It shows Stop and Cancel, each with its own key cap.
-- [ ] 1d. The strip is legible in all four existing states.
-- [ ] 1e. The pill keeps its warm paper ground and black bars. The identity does
+      *Blocked on gate 6: there are no profiles. The slot shows the hotkey
+      instead of inventing a profile name that would mean nothing.*
+- [x] 1b. It shows the current hotkey rendered as a key cap, not prose.
+- [x] 1c. It shows Stop and Cancel, each with its own key cap.
+- [x] 1d. The strip is legible in all four existing states.
+- [x] 1e. The pill keeps its warm paper ground and black bars. The identity does
       not change; only the legend is added.
 
 ### 2. Menu bar state dot — BUILT + small addition
 
-- [ ] 2a. Four states are distinguishable at menu-bar size: loading, recording,
+- [x] 2a. Four states are distinguishable at menu-bar size: loading, recording,
       transcribing, done.
-- [ ] 2b. State is visible **without opening the menu**.
-- [ ] 2c. It survives a light and a dark menu bar.
+      *Shipped as idle / recording / transcribing / message, which is the
+      vocabulary this app actually has -- there is no tray-visible "loading" or
+      "done" state to colour. Artwork verified at 18pt on a light and a dark
+      bar; the live NSStatusItem swap is not verified, see below.*
+- [x] 2b. State is visible **without opening the menu**.
+- [x] 2c. It survives a light and a dark menu bar.
+
+**Not verified:** the live NSStatusItem swap. The icon would not register from
+a bare-interpreter harness, and with a full menu bar and a notch that cannot be
+told apart from a real fault. Worth one look while the app is running for real.
 
 **Known trap:** `tray_mac.py` calls `setTemplate_(True)`, and macOS flattens a
 template image to one colour. Either composite a non-template variant for the
@@ -101,10 +111,10 @@ non-idle states, or make state a *shape* change. Deciding which is part of 2a.
 
 ### 3. Cancel — NEW
 
-- [ ] 3a. Esc cancels a recording in progress, unconditionally.
-- [ ] 3b. It works with a dead-key hotkey such as `f8`, where cancel-on-other-key
+- [x] 3a. Esc cancels a recording in progress, unconditionally.
+- [x] 3b. It works with a dead-key hotkey such as `f8`, where cancel-on-other-key
       does not apply — today there is no way to abandon a dictation at all.
-- [ ] 3c. The recording is discarded, not transcribed.
+- [x] 3c. The recording is discarded, not transcribed.
 
 ### 4. Settings window — the three tiers
 
