@@ -1,7 +1,8 @@
 # Vocal Advantage
 
-Hold a key, talk, let go — what you said appears in whatever app you were
-already typing in.
+Tap a key, talk, tap it again — what you said appears in whatever app you were
+already typing in. Or hold the key down and let go when you finish; the same
+key does both.
 
 Everything happens on this PC. Your voice never leaves the machine, there is no
 account, and nothing is uploaded. After setup it works with the internet off.
@@ -68,12 +69,30 @@ When you see `Ready.`, it is listening for your hotkey.
 
 1. Click into the app you want the text to land in — Notepad, a browser box,
    Slack, anything.
-2. Hold **Right Ctrl** down. A small pill appears at the bottom of the screen
-   and Windows shows its "microphone in use" indicator.
+2. Press the hotkey. A small pill appears at the bottom of the screen.
 3. Talk.
-4. Let go. About a second or two later the text appears where your cursor was.
+4. Stop, one of two ways:
+   - **Tap** the key again. (This is what happens if your first press was a
+     quick tap — under `tap_threshold_s`, 0.3s by default.)
+   - **Let go**, if you held the key down past that threshold.
 
-Tapping the key quickly and saying nothing does nothing — that is on purpose.
+   You do not have to decide in advance. Press and release quickly and it
+   toggles; press and hold and it behaves like a walkie-talkie.
+
+The text appears a fraction of a second after you stop, because most of the
+transcribing already happened while you were talking — see "How fast it is".
+
+If you forget a toggled recording, it stops itself: after
+`silence_timeout_s` of quiet (2.5s), or `max_duration_s` (5 minutes),
+whichever comes first. Either way what you said is still transcribed and
+pasted, never thrown away.
+
+**The microphone is open the whole time the app is running**, so your OS shows
+its "microphone in use" indicator continuously. That is the price of the key
+responding instantly — opening the device on the keypress used to clip the
+start of the first word. Audio recorded while you are not dictating goes into a
+two-second buffer that is thrown away, never transcribed and never written
+anywhere.
 
 ---
 
@@ -122,12 +141,16 @@ shared through git — it is your machine's settings.
 | `hotkey` | `"right ctrl"` | The key you hold to talk. |
 | `language` | `"en"` | English. Fixed, so it never has to guess. |
 | `model` | `"small"` | Which speech model to use. See the table below. |
-| `device` | `"auto"` | Graphics card if there is one, otherwise CPU. |
+| `device` | `"auto"` | Best available: Metal on Apple Silicon, CUDA on an NVIDIA card, otherwise CPU. Force one with `"metal"`, `"cuda"` or `"cpu"`. The chosen backend is printed at startup. |
 | `min_duration_s` | `0.4` | Anything shorter than this is thrown away. |
 | `max_duration_s` | `300` | Force-stops a recording you forgot about, after 5 minutes. |
-| `live_typing` | `true` | **macOS only.** Type words as you speak them. Turn off to keep a larger model affordable — every live pass re-transcribes the sentence from the start. Forced off when `ai_cleanup` is on. |
+| `tap_threshold_s` | `0.3` | Release the key faster than this and it toggles; hold longer and it stops when you let go. |
+| `silence_timeout_s` | `2.5` | Auto-stops after this much silence. `0` turns it off. Silence before you have said anything does not count. |
+| `chunk_s` | `2.0` | How much audio is transcribed at a time while you speak. Bigger is more accurate and leaves more work for the moment you stop — see "How fast it is". |
+| `overlap_s` | `0.25` | How far each chunk reaches back into the last one, so a word on a boundary is not lost. |
+| `timings` | `true` | Print the millisecond breakdown after every dictation. |
 | `clean_speech` | `true` | Drops "um", "uh" and stutters before anything is typed. Set `false` for the raw transcript. |
-| `ai_cleanup` | `false` | An extra pass through a local Ollama model. Off: see `docs/plans/2026-08-20-speech-cleanup.md`. Pauses the live word-by-word preview when on. |
+| `ai_cleanup` | `false` | An extra pass through a local Ollama model. Off: see `docs/plans/2026-08-20-speech-cleanup.md`. |
 
 ### Choosing a model
 
@@ -142,20 +165,96 @@ times quicker:
 | `small` | 464 MB | 1.06s | 2.7x faster |
 | `large-v3-turbo` | 1.5 GB | 5.18s | **slower than speaking** |
 
-The live word-by-word preview re-transcribes the whole sentence on every pass,
-so its cost grows with how long you talk. That is why `large-v3-turbo` is not
-the default despite being the most accurate: on a CPU it cannot keep up with
-speech at all, and even `small` starts lagging on long sentences. On a machine
-with an NVIDIA card, raising this is worth trying.
+On Apple Silicon these are the CPU numbers, and the CPU is no longer what runs
+the model — see below.
+
+---
+
+## How fast it is
+
+Transcribing does not wait for you to stop talking. While you speak, each
+`chunk_s` of audio is trimmed of silence and transcribed as it arrives, and the
+results are kept internally (never shown, never typed into your document — a
+word that appears and then changes is worse than one that appears a moment
+later). When you stop, only the leftover tail still needs transcribing.
+
+Measured on an M4 MacBook Air with `small` on Metal:
+
+| Stage | Typical |
+| --- | --- |
+| Keypress → first audio | ~0 ms (the stream is already open) |
+| One 2s chunk | ~200–260 ms |
+| Final chunk on stop | ~200–230 ms |
+| Cleanup pass (rules) | <1 ms |
+| **Model time vs. audio length** | **0.09–0.17x** |
+
+So a five-second sentence costs roughly 450 ms *after* you stop, most of which
+is the final chunk — not the two-plus seconds a single pass over the whole
+recording would take.
+
+Every dictation prints this breakdown to the console. Turn it off with
+`"timings": false`.
+
+### Apple Silicon runs on the GPU
+
+`faster-whisper` (CTranslate2) has a CUDA backend and **no Metal one** — on an
+M-series Mac it reports zero GPU devices. So Metal needs a second engine,
+`mlx-whisper`, and the app picks it automatically when it is installed:
+
+```
+pip install --no-deps mlx-whisper
+pip install mlx numba scipy tiktoken huggingface_hub more-itertools tqdm
+```
+
+`--no-deps` is deliberate: `mlx-whisper` declares `torch` (529 MB) as a
+dependency but never imports it at runtime — only its checkpoint-conversion
+script uses it. `pip install -e ".[metal]"` works too and costs you the 529 MB.
+
+Without it the Mac runs on the CPU and everything else behaves identically. The
+startup line tells you which you got:
+
+```
+Speech backend: mlx-whisper on Metal (Apple GPU) [metal/float16]
+```
+
+Metal makes `small` cost about what `base` used to on the CPU (0.27s vs 0.30s
+per pass), so you get the more accurate model for free.
+
+### Does chunking hurt accuracy?
+
+It was expected to — Whisper uses up to 30 seconds of context, so short windows
+should hear less well. Measured against the eight clips in
+`tests/fixtures/accuracy`, word error rate came out:
+
+| | Mean WER |
+| --- | --- |
+| One pass over the whole recording | 17.2% |
+| 2s chunks (default) | 16.1% |
+| 6s chunks | 14.7% |
+
+So it did not, on this sample — chunking was slightly *better*, and longer
+windows better still. Eight clips is a small sample and the differences are
+within noise, so treat this as "no measurable penalty" rather than "chunking
+improves accuracy". If you talk in long sentences, `"chunk_s": 6.0` is worth
+trying: it leaves a little more work for the moment you stop.
 
 ---
 
 ## Limitations — the honest list
 
-**Your clipboard gets replaced.** This works by putting the text on the
-clipboard and pressing Ctrl+V for you, so whatever you had copied before is
-gone. Putting it back is planned for a later version. (Dictated text is kept out
-of Windows clipboard history and out of cloud clipboard sync.)
+**Your clipboard is borrowed, then given back.** This works by putting the text
+on the clipboard and pressing Ctrl+V (Cmd+V on a Mac) for you. Whatever you had
+copied is saved first and put back a quarter of a second after the paste. Two
+caveats: only *text* is restored, so a copied image does not survive a
+dictation, and if the clipboard cannot be read at that moment it is left alone
+rather than blanked. (Dictated text is kept out of Windows clipboard history,
+out of cloud clipboard sync, and marked so macOS clipboard managers skip it.)
+
+**The microphone indicator stays on.** The stream is opened at startup and kept
+open so the hotkey responds instantly, which means your OS shows the app as
+using the microphone the whole time it runs. Audio recorded outside a dictation
+is discarded — but you are taking that on trust rather than reading it off the
+screen, which was not true of earlier versions.
 
 **Windows running as administrator cannot receive it.** Windows blocks ordinary
 programs from typing into elevated ones — Task Manager, some installers. Nothing
