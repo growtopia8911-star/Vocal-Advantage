@@ -65,6 +65,17 @@ ERROR_MESSAGE = "error"
 # elevated window, but the text is on the clipboard, so say so.
 PASTE_FAILED_MESSAGE = "could not paste - press Ctrl+V"
 
+#: The one key that always throws a recording away.
+#:
+#: Cancel-on-other-key (below, in `_handle_down`) is narrower than it looks: it
+#: needs a bare-modifier hotkey AND the hotkey physically held, both for good
+#: reasons. The gap that leaves is total -- with a dead key like `f8`, or in
+#: toggle mode with any hotkey, a recording you have changed your mind about
+#: can only be finished, never abandoned. This closes it with one key and no
+#: conditions, which is also the only version worth putting on the Flow Bar:
+#: a legend that has to explain when it applies is not a legend.
+CANCEL_KEY = "esc"
+
 
 class State(Enum):
     IDLE = auto()
@@ -214,6 +225,12 @@ class DictationController:
 
     def _handle_down(self, key: str) -> None:
         if key not in self._hotkey.keys:
+            # Esc first, and unconditionally. Reached only when esc is not part
+            # of the hotkey, so someone who dictates *with* Esc keeps it.
+            if key == CANCEL_KEY and self.state is State.RECORDING:
+                self._cancel()
+                return
+
             # SPEC.md: cancel-on-other-key applies only to a bare-modifier
             # hotkey -- with Right Ctrl the user was typing Right Ctrl+C, not
             # dictating.
