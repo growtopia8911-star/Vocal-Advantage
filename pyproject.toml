@@ -50,6 +50,26 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 
+# Metal acceleration on Apple Silicon. Optional: without it the Mac runs the
+# model on the CPU and everything else works identically.
+#
+# CTranslate2 (what faster-whisper runs on) has a CUDA backend and no Metal
+# one -- on this machine it reports compute types {int8, float32, int8_float32}
+# and zero GPU devices. So "use the GPU on a Mac" is a second engine, not a
+# setting. Measured here: `small` in 0.27s warm on Metal, against ~0.30s for
+# the smaller `base` on the same machine's CPU.
+#
+# WARNING, and it is the reason this is not in `dependencies`: mlx-whisper
+# declares `torch` as a dependency and pip will pull 529 MB of it. It is not
+# imported at runtime -- only its checkpoint-conversion script uses it -- and
+# this project's venv is documented as torch-free. Install it without:
+#
+#     pip install --no-deps mlx-whisper
+#     pip install mlx numba scipy tiktoken huggingface_hub more-itertools tqdm
+#
+# `pip install -e ".[metal]"` works too and costs you the 529 MB.
+metal = ["mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+
 [tool.setuptools]
 packages = ["vocal_advantage"]
 
