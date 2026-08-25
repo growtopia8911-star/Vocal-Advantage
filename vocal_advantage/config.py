@@ -61,9 +61,26 @@ DEFAULTS: dict = {
     # The rolling window transcribed while you are still speaking, and how far
     # each window reaches back into the one before it. The overlap is what
     # stops a word landing on a boundary and being heard as half a word twice;
-    # see chunker.py. Longer windows are more accurate (Whisper uses up to 30s
-    # of context) and leave more work for the moment you stop.
-    "chunk_s": 2.0,
+    # see chunker.py.
+    #
+    # 15s, not the 2s this shipped with, and the reason is measured. Whisper
+    # uses up to 30 seconds of context, so short windows hear worse: on the
+    # eight clips in tests/fixtures/accuracy, 2s windows score 16.1% word error
+    # against 9.4% for a single pass over the whole utterance. That is a large
+    # penalty.
+    #
+    # It was worth paying only while transcription was slow enough that doing
+    # it after the key release hurt. On Metal it is not: `small` runs at 0.06x
+    # real time, so a five-second utterance costs 0.3s to transcribe in one
+    # go -- about what the chunked path costs anyway, because that still has a
+    # final window to do. Chunking was solving a problem the GPU already
+    # solved.
+    #
+    # So: a window long enough that ordinary dictation never reaches it and
+    # gets whole-utterance accuracy, but short enough that a very long one
+    # still has its latency bounded. Lower it if you dictate on a slow CPU,
+    # where a whole-utterance pass after the key release is genuinely felt.
+    "chunk_s": 15.0,
     "overlap_s": 0.25,
     # Filler words and stutters are dropped before anything is typed. Set
     # false for the raw transcript. Not in the original spec: added once a

@@ -29,7 +29,7 @@ def write(tmp_path, **overrides):
     [
         ("tap_threshold_s", 0.3),   # 4d
         ("silence_timeout_s", 2.5),  # 6b
-        ("chunk_s", 2.0),            # 7e
+        ("chunk_s", 15.0),           # 7e
         ("overlap_s", 0.25),         # 7e
         ("timings", True),           # 11
     ],
