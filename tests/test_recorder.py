@@ -59,6 +59,11 @@ class FakeStream:
             raise FakePortAudioError("Error closing stream: Device unavailable")
         self.closed = True
 
+    @property
+    def active(self) -> bool:
+        """What a real sounddevice stream exposes; False once the device is gone."""
+        return self.started and not self.closed and self._module.device_present
+
     def feed(self, samples) -> None:
         """Deliver one block of audio the way PortAudio's thread would."""
         block = np.asarray(samples, dtype=np.float32).reshape(-1, 1)
@@ -187,14 +192,22 @@ def test_stop_returns_the_captured_audio_as_flat_float32(fake_sd):
     np.testing.assert_allclose(audio, [0.1, 0.2, 0.3, 0.4, 0.5], rtol=1e-6)
 
 
-def test_stop_closes_the_stream_so_the_mic_indicator_goes_out(fake_sd):
+def test_stop_stops_capturing_but_leaves_the_stream_open(fake_sd):
+    """Reversed deliberately by requirement 2 (was: stop closes the stream).
+
+    The stream now outlives the dictation so the next keypress costs nothing.
+    The visible price is that the OS microphone indicator stays lit while the
+    app runs; see the module docstring in recorder.py.
+    """
     rec = Recorder()
+    rec.open()
     rec.start()
     stream = fake_sd.stream
 
     rec.stop()
 
-    assert stream.closed is True
+    assert stream.closed is False
+    assert rec.is_open is True
     assert rec.is_recording is False
 
 

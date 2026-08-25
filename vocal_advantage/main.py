@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import platform
 import queue
 import sys
 import threading
@@ -34,13 +35,18 @@ from vocal_advantage.frontmost import frontmost_app, matches
 from vocal_advantage.history import HISTORY_PATH, History
 from vocal_advantage.sounds import Player
 from vocal_advantage.hotkey_spec import HotkeyError, HotkeySpec, parse_hotkey
+from vocal_advantage.backends import (
+    choose_backend,
+    describe_choice,
+    has_cuda,
+    has_mlx,
+)
 from vocal_advantage.cleanup import (
     ai_clean,
     clean_speech,
     strip_fillers,
     warm_up_model,
 )
-from vocal_advantage.streaming import StreamingTranscript
 
 VERSION = "0.1.0"
 
@@ -126,6 +132,15 @@ class NarratingTranscriber:
             warm()
 
     def transcribe(self, audio):
+        """Transcribe, and say what came back.
+
+        **Only worth attaching to a whole dictation, not to the chunk pump.**
+        The pipeline now transcribes a ~2s window every couple of seconds while
+        someone speaks, and narrating each one would bury the console under
+        fragments -- and the timing report already carries the per-chunk
+        milliseconds. Nothing in the app wraps the transcriber with this any
+        more; it is kept for tools/ and for debugging one utterance by hand.
+        """
         started = time.monotonic()
         text = self._inner.transcribe(audio)
         took = time.monotonic() - started
@@ -204,138 +219,85 @@ def _warm_up_ai_cleanup(cfg: dict) -> None:
         )
 
 
-def live_typing_enabled(cfg: dict) -> bool:
-    """Whether words are typed as they are spoken.
+def report_backend(cfg: dict) -> None:
+    """Say which engine and device this launch is using (spec 3d).
 
-    The AI pass forces this off and always will: it can only clean a finished
-    sentence, so words already typed would have to be backspaced over
-    afterwards, in a document we do not own.
-
-    But that constraint runs one way only, and the two were welded together in
-    both directions by mistake. Turning the AI pass off does not mean live
-    typing is *wanted* -- and on macOS it costs real money, because every pass
-    re-transcribes the sentence from the start. At `small`'s RTF of 0.37 on
-    that CPU a ten-second sentence is ~3.7s per pass, so live typing is what
-    made `small` unaffordable there and `base` the only option.
-
-    Separating them is what lets one machine run `small` with no model and no
-    live preview, which is the combination that was previously unreachable.
+    One line, printed before the model loads, so a slow first load is
+    attributable rather than mysterious. The probes never raise -- a machine
+    with no CUDA and no MLX simply answers "CPU".
     """
-    if cfg.get("ai_cleanup", False):
-        return False
-    return bool(cfg.get("live_typing", True))
+    choice = choose_backend(
+        device_setting=cfg.get("device", "auto"),
+        platform=sys.platform,
+        machine=platform.machine(),
+        cuda=has_cuda(),
+        mlx=has_mlx(),
+    )
+    if choice.warning:
+        warn("WARNING: %s" % choice.warning)
+    say(describe_choice(choice))
+    return choice
 
 
-class CleaningPaster:
-    """Wraps a paster so filler words never reach the document.
+def _open_microphone(recorder) -> None:
+    """Open the mic at startup and leave it open (spec item 2).
 
-    The Windows path has no live preview -- the whole transcript arrives at
-    once on key release -- so there is no LiveDictation to clean inside and the
-    cleaning belongs here instead. Same rule either way: clean before the text
-    is typed, never after.
+    Not fatal on failure. Recorder.start() reopens on demand, so a microphone
+    that is unplugged at launch and connected afterwards still works -- and
+    refusing to start the app over it would be a poor trade for a device the
+    user can fix in a second.
     """
+    try:
+        recorder.open()
+    except Exception as error:  # noqa: BLE001 - a mic can arrive later
+        warn("WARNING: could not open the microphone at startup: %s" % error)
+        warn("Dictation will try again on the first keypress.")
+        return
+    say(
+        "Microphone open and listening for the hotkey. "
+        "(The OS microphone indicator stays on while the app runs; audio is "
+        "discarded until you press the key.)"
+    )
 
-    def __init__(self, paster, clean=clean_speech) -> None:
-        self._paster = paster
-        self._clean = clean
 
-    def paste_text(self, text: str) -> bool:
-        cleaned = self._clean(text)
-        if not cleaned:
-            # The user said nothing but "um". Reporting failure would flash an
-            # error at a dictation that worked exactly as asked.
-            return True
-        return bool(self._paster.paste_text(cleaned))
+def _build_controller(cfg, spec, *, recorder, transcriber, paster, indicator,
+                      dictionary=None):
+    """The one place the controller's settings are read out of config.
 
-
-class LiveDictation:
-    """Types words as they settle, while the user is still speaking.
-
-    Sits in two places at once, which is the whole trick:
-
-    * ``on_partial`` runs on each controller tick while RECORDING. It
-      transcribes the audio so far and types whichever words two consecutive
-      passes agree on.
-    * ``paste_text`` satisfies the paster protocol, so when the key is released
-      and the controller delivers the final transcript, this types only the part
-      the partial passes have not already typed.
-
-    Without the second half the whole dictation would be typed twice.
+    Both launchers call this so the two platforms cannot drift apart on, say,
+    what the tap threshold is -- which is exactly the sort of difference that
+    is invisible until someone reports the hotkey "feeling different" on one
+    machine.
     """
+    return DictationController(
+        hotkey=spec,
+        recorder=recorder,
+        transcriber=transcriber,
+        paster=paster,
+        indicator=indicator,
+        min_duration_s=float(cfg["min_duration_s"]),
+        max_duration_s=float(cfg["max_duration_s"]),
+        tap_threshold_s=float(cfg["tap_threshold_s"]),
+        silence_timeout_s=float(cfg["silence_timeout_s"]),
+        chunk_s=float(cfg["chunk_s"]),
+        overlap_s=float(cfg["overlap_s"]),
+        # The cleanup pass lives here now rather than inside a paster wrapper:
+        # the controller runs it once on the stitched whole and times it, which
+        # is what spec items 9c and 11d ask for.
+        clean=_cleaner(cfg, dictionary),
+        on_timings=timings_reporter(cfg),
+    )
 
-    SAMPLE_RATE = 16000
-    #: Below this there is not enough audio for a pass to tell you anything,
-    #: and running the model on it is pure waste.
-    MIN_AUDIO_S = 0.8
-    #: The floor between passes. Not a pace-setter -- just enough to stop a
-    #: very fast machine from spinning on identical audio.
-    MIN_GAP_S = 0.05
-    #: Past this much audio the live preview stops. Every pass re-transcribes
-    #: from the start, so cost grows with length -- and a pass in flight delays
-    #: the key-release event queued behind it. The final transcript on release
-    #: still delivers everything; only the preview goes quiet.
-    MAX_PARTIAL_S = 25.0
 
-    def __init__(
-        self, *, recorder, transcriber, type_partial, type_final,
-        clock=time.monotonic, clean=clean_speech,
-    ) -> None:
-        self._recorder = recorder
-        # Applied before the agreement logic, never after: a filler that
-        # reached the document could only be removed by backspacing over words
-        # the user is watching. Identity when config says clean_speech=false.
-        self._clean = clean
-        self._transcriber = transcriber
-        self._type_partial = type_partial
-        self._type_final = type_final
-        self._clock = clock
-        self._session = StreamingTranscript()
-        self._last_samples = 0
-        # Self-pacing. There is no good constant here: a pass costs ~0.05s on a
-        # GPU and seconds on a weak CPU, so the cadence is derived from the
-        # measured cost of the previous pass -- next pass earned one
-        # pass-duration after the last one finished (at most half the machine's
-        # time spent transcribing). Fast hardware ticks fast, slow hardware
-        # backs off, and no tuning survives being wrong on somebody's machine.
-        self._next_pass_at = 0.0
+def timings_reporter(cfg: dict):
+    """What the controller calls after each dictation, or a no-op if switched off."""
+    if not cfg.get("timings", True):
+        return lambda timings: None
 
-    def on_partial(self) -> None:
-        if self._clock() < self._next_pass_at:
-            return
-        audio = self._recorder.snapshot()
-        # The buffer shrinking means the recorder started a fresh recording --
-        # a previous one was cancelled without ever reaching paste_text.
-        if audio.size < self._last_samples:
-            self._session.reset()
-        self._last_samples = audio.size
+    def report(timings) -> None:
+        say(timings.report())
 
-        if audio.size < int(self.MIN_AUDIO_S * self.SAMPLE_RATE):
-            return
-        if audio.size > int(self.MAX_PARTIAL_S * self.SAMPLE_RATE):
-            return
-        started = self._clock()
-        text = self._clean(self._transcriber.transcribe(audio))
-        took = self._clock() - started
-        self._next_pass_at = self._clock() + max(took, self.MIN_GAP_S)
-        fresh = self._session.commit(text)
-        if fresh:
-            say(
-                f"  [live +{audio.size / self.SAMPLE_RATE:.1f}s in {took:.2f}s]"
-                f" {fresh.strip()!r}"
-            )
-            self._type_partial(fresh)
-
-    def paste_text(self, text: str) -> bool:
-        """The controller's final delivery: type whatever is still owed."""
-        remaining = self._session.finish(self._clean(text))
-        self._session.reset()
-        self._last_samples = 0
-        self._next_pass_at = 0.0
-        if not remaining:
-            # Everything was already typed live. That is a success; reporting
-            # failure would flash "could not paste" at a dictation that worked.
-            return True
-        return bool(self._type_final(remaining))
+    return report
 
 
 class ConsoleIndicator:
@@ -903,8 +865,11 @@ def _stop_dictation(listener, recorder, worker, events, stop_event) -> None:
 
     try:
         if recorder.is_recording:
-            # Closes the stream, so the "microphone in use" light goes out.
-            recorder.stop()
+            recorder.stop()  # bin any half-finished capture
+        # The stream now outlives individual dictations, so shutdown is the
+        # only thing that closes it -- and closing it is what finally puts the
+        # OS "microphone in use" indicator out.
+        recorder.close()
     except Exception:  # noqa: BLE001
         warn(traceback.format_exc())
 
@@ -949,6 +914,10 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     player = _make_player(cfg)
     history = _make_history(cfg)
 
+    # Opened once, here, and kept open for the life of the process (item 2).
+    _open_microphone(recorder)
+
+    report_backend(cfg)
     say("Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"]))
     transcriber_cls = import_transcriber_class()
     transcriber = transcriber_cls(
@@ -964,19 +933,15 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     say("Model ready.")
     _warm_up_ai_cleanup(cfg)
 
-    controller = DictationController(
-        hotkey=spec,
+    controller = _build_controller(
+        cfg, spec,
         recorder=recorder,
         transcriber=transcriber,
         # paste_win itself satisfies the paster protocol: a module-level
         # paste_text(str) -> bool is the whole interface.
-        paster=RecordingPaster(
-            CleaningPaster(paste_win, clean=_cleaner(cfg, dictionary)),
-            history,
-        ),
+        paster=RecordingPaster(paste_win, history),
         indicator=SoundingIndicator(indicator, player),
-        min_duration_s=float(cfg["min_duration_s"]),
-        max_duration_s=float(cfg["max_duration_s"]),
+        dictionary=dictionary,
     )
 
     events: "queue.Queue" = queue.Queue()
@@ -1103,6 +1068,12 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     player = _make_player(cfg)
     history = _make_history(cfg)
 
+    # The microphone opens now and stays open, so the hotkey costs a flag flip
+    # rather than a device negotiation (spec item 2). A failure here is not
+    # fatal: start() reopens on demand, so a mic plugged in later still works.
+    _open_microphone(recorder)
+
+    report_backend(cfg)
     say("Loading the %s model on device=%s ..." % (cfg["model"], cfg["device"]))
     transcriber_cls = import_transcriber_class()
     transcriber = transcriber_cls(
@@ -1116,24 +1087,13 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     say("Model ready.")
     _warm_up_ai_cleanup(cfg)
 
-    # The raw transcriber for partial passes: narrating every one of them would
-    # bury the console. The final transcript still gets reported.
-    live = LiveDictation(
+    controller = _build_controller(
+        cfg, spec,
         recorder=recorder,
         transcriber=transcriber,
-        type_partial=paste_mac.type_partial,
-        type_final=paste_mac.paste_text,
-        clean=_cleaner(cfg, dictionary),
-    )
-    controller = DictationController(
-        hotkey=spec,
-        recorder=recorder,
-        transcriber=NarratingTranscriber(transcriber),
-        paster=RecordingPaster(live, history),
+        paster=RecordingPaster(paste_mac.paste_text, history),
         indicator=SoundingIndicator(indicator, player),
-        min_duration_s=float(cfg["min_duration_s"]),
-        max_duration_s=float(cfg["max_duration_s"]),
-        on_partial=live.on_partial if live_typing_enabled(cfg) else None,
+        dictionary=dictionary,
     )
 
     events: "queue.Queue" = queue.Queue()

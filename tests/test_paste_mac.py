@@ -91,6 +91,11 @@ class FakeBackend:
         self.clipboard_text = text
         self._record("clipboard_set", text)
 
+    def get_clipboard(self):
+        """What the user had copied before the dictation (spec 10c)."""
+        self._record("clipboard_get", self.clipboard_text)
+        return self.clipboard_text
+
     def send_key(self, vk, down):
         self._record("key_down" if down else "key_up", vk)
         return self.send_result
@@ -101,11 +106,13 @@ def test_the_clipboard_route_still_matches_windows_step_for_step():
     typing hundreds of characters. Same delays as Windows: paste_core owns
     them for both."""
     fake = FakeBackend()
+    fake.clipboard_text = "prior contents"   # something to save and put back
 
     assert paste_mac.paste_via_clipboard("hello world", backend=fake) is True
 
     assert fake.log == [
         ("modifiers_down", False, 0.0),
+        ("clipboard_get", "prior contents", 0.0),
         ("clipboard_set", "hello world", 0.0),
         ("sleep", 0.1, 0.0),
         ("key_down", paste_mac.KEYCODE_COMMAND, 0.1),
@@ -116,7 +123,10 @@ def test_the_clipboard_route_still_matches_windows_step_for_step():
         ("sleep", 0.02, 0.14),
         ("key_up", paste_mac.KEYCODE_COMMAND, 0.16),
         ("sleep", 0.06, 0.16),
+        ("sleep", 0.25, 0.22),
+        ("clipboard_set", "prior contents", 0.47),
     ]
+    assert fake.clipboard_text == "prior contents"
 
 
 def test_it_waits_for_a_held_modifier_before_pasting():
@@ -157,7 +167,7 @@ def test_the_gate_is_cleared_even_if_the_backend_explodes():
             raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError):
-        paste_mac.paste_text("hello", backend=ExplodingTyper())
+        paste_mac.type_text("hello", backend=ExplodingTyper())
     assert not paste_mac.injection_active.is_set()
 
     with pytest.raises(RuntimeError):
@@ -325,24 +335,40 @@ class TypingFakeBackend(FakeBackend):
         return True
 
 
-def test_typing_never_touches_the_clipboard():
-    """The whole point. Your clipboard is yours; a dictation should not
-    silently replace whatever you had copied."""
+def test_the_typing_route_never_touches_the_clipboard():
+    """Still true of type_text, which is no longer what dictation uses.
+
+    Requirement 10 moved dictation onto the clipboard route. The promise that
+    "your clipboard is yours" is now kept by saving and restoring it around
+    the paste (see tests/test_paste_clipboard.py) rather than by never
+    touching it.
+    """
     fake = TypingFakeBackend()
 
-    assert paste_mac.paste_text("hello world", backend=fake) is True
+    assert paste_mac.type_text("hello world", backend=fake) is True
 
     assert fake.clipboard_text is None
     assert [e[0] for e in fake.log] == ["modifiers_down", "typed", "sleep"]
     assert fake.typed == ["hello world"]
 
 
-def test_typing_still_waits_for_a_held_modifier():
+def test_dictation_now_goes_through_the_clipboard_on_macos():
+    """10b: no per-character synthetic typing on either platform any more."""
+    fake = FakeBackend()
+
+    assert paste_mac.paste_text("hello world", backend=fake) is True
+
+    assert fake.log[0][0] == "modifiers_down"
+    assert any(entry[0] == "clipboard_set" for entry in fake.log)
+    assert any(entry[0] == "key_down" for entry in fake.log)
+
+
+def test_the_typing_route_still_waits_for_a_held_modifier():
     """Critical here, not merely tidy: the hotkey IS Command. Typing while it
     is still physically down turns every character into a keyboard shortcut."""
     fake = TypingFakeBackend(modifier_polls_held=2)
 
-    assert paste_mac.paste_text("hello", backend=fake) is True
+    assert paste_mac.type_text("hello", backend=fake) is True
 
     assert [e[0] for e in fake.log[:5]] == [
         "modifiers_down", "sleep", "modifiers_down", "sleep", "modifiers_down",
@@ -396,35 +422,7 @@ def test_unicode_survives_being_typed(fake_quartz):
     assert typed == "naive cafe -- ni hao"
 
 
-def test_typing_a_partial_never_raises_the_injection_gate():
-    """The live-dictation case, and the gate would be actively harmful here.
-
-    During a partial the user is still HOLDING the hotkey. The gate makes the
-    key hook ignore every event while it is up -- so if it were raised when they
-    released the key, the release would be swallowed and the recording would
-    never stop. Stamping each event is what keeps our own keystrokes out of the
-    hook instead, and unlike the gate it is exact.
-    """
-    fake = TypingFakeBackend()
-
-    assert paste_mac.type_partial("hello", backend=fake) is True
-
-    assert not any(fake.flag_seen), "the gate must stay down for a partial"
-    assert not paste_mac.injection_active.is_set()
-    assert fake.typed == ["hello"]
-
-
-def test_a_partial_still_waits_for_no_modifier_it_can_control():
-    """It cannot wait for the hotkey to be released -- that is the whole point,
-    the user is still holding it. So a partial types straight away."""
-    fake = TypingFakeBackend(modifier_polls_held=10**6)
-
-    assert paste_mac.type_partial("hello", backend=fake) is True
-
-    assert [e[0] for e in fake.log] == ["typed"]
-
-
 def test_the_final_paste_still_raises_the_gate():
     fake = TypingFakeBackend()
-    paste_mac.paste_text("hello", backend=fake)
+    paste_mac.type_text("hello", backend=fake)
     assert all(fake.flag_seen)

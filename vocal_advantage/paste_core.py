@@ -38,6 +38,12 @@ CLIPBOARD_RETRY_S = 0.05
 CLIPBOARD_SETTLE_S = 0.1  # apps fetch the clipboard lazily
 KEY_INTERVAL_S = 0.02
 POST_PASTE_S = 0.06
+#: How long the transcript stays on the clipboard after the chord before the
+#: user's own contents are put back. Apps fetch the clipboard lazily and some
+#: do it well after the keystroke; restoring immediately would race them and
+#: paste the *old* clipboard into the document, which is far worse than the
+#: clipboard being briefly wrong.
+CLIPBOARD_RESTORE_S = 0.25
 
 
 class PasteBackend(Protocol):
@@ -105,54 +111,83 @@ def send_chord(backend: PasteBackend, chord: Iterable[tuple[int, bool]]) -> bool
     return inserted_everything
 
 
+def read_clipboard(backend) -> str | None:
+    """The clipboard's current contents, or None if they could not be read.
+
+    None and "" are deliberately different answers. "" means the clipboard was
+    genuinely empty and must be restored to empty; None means we do not know
+    what was there, and the only safe response to that is to leave whatever we
+    wrote in place rather than blank something we never saw.
+
+    A backend need not implement this at all -- save/restore is best-effort.
+    """
+    reader = getattr(backend, "get_clipboard", None)
+    if reader is None:
+        return None
+    try:
+        value = reader()
+    except Exception:  # noqa: BLE001 - unreadable is a normal outcome here
+        return None
+    return value if isinstance(value, str) else None
+
+
+def restore_clipboard(backend, saved: str | None) -> None:
+    """Put ``saved`` back. Never raises, never blanks on an unknown.
+
+    Failing to restore is a papercut; raising here would turn a successful
+    dictation into a failed one after the text has already been pasted.
+    """
+    if saved is None:
+        return
+    try:
+        backend.set_clipboard(saved)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def paste_with(
     text: str, backend: PasteBackend, chord: Iterable[tuple[int, bool]]
 ) -> bool:
-    """Put text on the clipboard and paste it into the focused window.
+    """Put text on the clipboard, paste it, and put the clipboard back.
 
     Returns False (never raises) when there is nothing to paste, when the
     clipboard could not be written, or when the OS refused the keystrokes. In
-    the last case the text is still on the clipboard for a manual paste.
+    the last case the text is still on the clipboard for a manual paste --
+    which is why the restore waits for the chord to have been *sent* rather
+    than to have succeeded.
+
+    The restore is in a ``finally``: a refused chord (spec 10e) or an
+    unexpected explosion must not leave the user's clipboard replaced by
+    whatever they happened to dictate.
     """
     if not text.strip():
         return False
 
     injection_active.set()
+    saved: str | None = None
+    wrote_clipboard = False
     try:
         wait_for_modifier_release(backend)
+        # Read before writing, or there is nothing left to read (10c).
+        saved = read_clipboard(backend)
         if not set_clipboard_with_retry(backend, text):
             return False
+        wrote_clipboard = True
         backend.sleep(CLIPBOARD_SETTLE_S)
         pasted = send_chord(backend, chord)
         # Keep the guard up a little longer so the hotkey hook sees and drops
         # our own injected key events before it starts listening again.
         backend.sleep(POST_PASTE_S)
+        # Then give the receiving app time to actually fetch what we wrote,
+        # before it is taken away again.
+        backend.sleep(CLIPBOARD_RESTORE_S)
         return pasted
     finally:
+        if wrote_clipboard:
+            restore_clipboard(backend, saved)
         # Always, even on an unexpected exception: a stuck flag would make the
         # hotkey stop working entirely until restart.
         injection_active.clear()
-
-
-def type_partial(text: str, backend) -> bool:
-    """Type words mid-dictation, while the user is still holding the hotkey.
-
-    Two deliberate differences from ``type_with``:
-
-    * **The injection gate stays down.** The gate makes the key hook ignore
-      every event while it is up. During a partial the user is still holding the
-      hotkey, so raising it risks swallowing their release -- and a recording
-      that never stops is a far worse bug than the one the gate prevents.
-      Platforms that stamp their synthetic events (macOS does) keep their own
-      keystrokes out of the hook exactly, without a gate.
-    * **It does not wait for modifiers to release.** It cannot: the modifier it
-      would wait for is the hotkey itself, still held. Safe only because typed
-      events carry cleared flags, so the held modifier does not combine with
-      them -- verified on macOS before this was written.
-    """
-    if not text.strip():
-        return False
-    return bool(backend.send_text(text))
 
 
 def type_with(text: str, backend) -> bool:

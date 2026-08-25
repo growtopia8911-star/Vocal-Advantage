@@ -164,6 +164,10 @@ def _load_win32():
         user32.SetClipboardData.restype = ctypes.c_void_p
         user32.RegisterClipboardFormatW.argtypes = [ctypes.c_wchar_p]
         user32.RegisterClipboardFormatW.restype = ctypes.c_uint
+        # Reading the clipboard back, for the save/restore around a paste.
+        # GlobalLock/GlobalUnlock are declared with the allocation calls below.
+        user32.GetClipboardData.argtypes = [ctypes.c_uint]
+        user32.GetClipboardData.restype = ctypes.c_void_p
         user32.MapVirtualKeyW.argtypes = [ctypes.c_uint, ctypes.c_uint]
         user32.MapVirtualKeyW.restype = ctypes.c_uint
         user32.SendInput.argtypes = [ctypes.c_uint, ctypes.POINTER(INPUT), ctypes.c_int]
@@ -246,6 +250,38 @@ def _set_clipboard(user32, kernel32, text: str) -> None:
         user32.CloseClipboard()
 
 
+def _get_clipboard(user32, kernel32) -> str | None:
+    """The clipboard's current text, or None if there is none to be had.
+
+    None covers every "we do not know" case -- the clipboard is locked by
+    another process, or holds an image rather than text. The caller treats None
+    as "leave it alone", which is the only safe reading: blanking a clipboard
+    whose contents we could not see would destroy data we never had.
+
+    Non-text clipboards are a real loss here. Restoring text-only means a
+    copied image does not survive a dictation. Handling every format would mean
+    enumerating and round-tripping arbitrary HGLOBALs, which is a great deal of
+    fragile code for a rare case; text is what people paste after dictating.
+    """
+    if not user32.OpenClipboard(None):
+        return None
+    try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return None
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
+            return None
+        try:
+            return ctypes.c_wchar_p(pointer).value
+        finally:
+            kernel32.GlobalUnlock(handle)
+    except Exception:  # noqa: BLE001 - unreadable is a normal outcome
+        return None
+    finally:
+        user32.CloseClipboard()
+
+
 def _send_key(user32, vk: int, down: bool) -> int:
     """Inject one key event. Returns the number of events actually inserted.
 
@@ -280,6 +316,9 @@ class Win32Backend:
 
     def modifiers_down(self) -> bool:
         return _modifiers_down(self._user32)
+
+    def get_clipboard(self) -> str | None:
+        return _get_clipboard(self._user32, self._kernel32)
 
     def set_clipboard(self, text: str) -> None:
         _set_clipboard(self._user32, self._kernel32, text)

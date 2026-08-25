@@ -470,13 +470,26 @@ def test_the_cpu_notice_does_not_promise_a_speed_it_cannot_know(capsys, monkeypa
     assert "1-2" not in err
 
 
-def test_auto_does_not_try_cuda_on_a_mac(monkeypatch):
+def test_auto_falls_back_to_cpu_on_a_mac_without_mlx(monkeypatch):
     """CTranslate2 has no CUDA build for Apple Silicon, so attempting it warns
     about a failure that can never be anything else. A warning printed on every
     launch for an impossibility trains people to ignore warnings."""
     monkeypatch.setattr(transcriber.sys, "platform", "darwin")
+    monkeypatch.setattr(transcriber, "has_mlx", lambda: False)
     t = Transcriber("base", "auto", "en", 0.4)
     assert t._device_plan() == (("cpu", "int8"),)
+
+
+def test_auto_uses_metal_on_a_mac_that_has_mlx(monkeypatch):
+    """The Metal path, which faster-whisper cannot reach -- a second engine
+    does (backends.MlxWhisperModel). Still no CUDA anywhere in the plan."""
+    monkeypatch.setattr(transcriber.sys, "platform", "darwin")
+    monkeypatch.setattr(transcriber, "has_mlx", lambda: True)
+    t = Transcriber("base", "auto", "en", 0.4)
+    plan = t._device_plan()
+    assert plan[0] == ("metal", "float16")
+    assert plan[-1] == ("cpu", "int8"), "Metal must still be able to demote"
+    assert not any(device == "cuda" for device, _ in plan)
 
 
 def test_auto_still_tries_cuda_on_windows(monkeypatch):

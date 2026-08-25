@@ -27,7 +27,6 @@ import time
 from vocal_advantage.paste_core import (  # noqa: F401
     CLIPBOARD_ATTEMPTS,
     type_with,
-    type_partial as _type_partial,
     CLIPBOARD_RETRY_S,
     CLIPBOARD_SETTLE_S,
     KEY_INTERVAL_S,
@@ -130,6 +129,22 @@ def _general_pasteboard():
     return NSPasteboard.generalPasteboard()
 
 
+def _get_clipboard() -> str | None:
+    """The pasteboard's current text, or None if it holds none.
+
+    None means "we do not know" and tells the caller to leave the pasteboard
+    alone -- see paste_core.read_clipboard. A pasteboard holding an image
+    answers None, so a copied image does not survive a dictation; restoring
+    arbitrary types would mean round-tripping every declared type on the
+    board, which is a lot of fragile code for a rare case.
+    """
+    try:
+        board = _general_pasteboard()
+        return board.stringForType_(PASTEBOARD_TYPE_STRING)
+    except Exception:  # noqa: BLE001 - unreadable is a normal outcome
+        return None
+
+
 def _set_clipboard(text: str) -> None:
     """Put text on the pasteboard, marked so clipboard managers skip it.
 
@@ -170,6 +185,9 @@ class MacBackend:
             Quartz.kCGEventSourceStateHIDSystemState
         )
         return bool(state & _all_modifier_mask())
+
+    def get_clipboard(self) -> str | None:
+        return _get_clipboard()
 
     def set_clipboard(self, text: str) -> None:
         _set_clipboard(text)
@@ -235,37 +253,36 @@ def _default_backend() -> PasteBackend:
 
 
 def paste_text(text: str, *, backend: PasteBackend | None = None) -> bool:
-    """Deliver the transcript to the focused app, without using the clipboard.
+    """Deliver the transcript to the focused app via the clipboard and Cmd+V.
 
-    macOS lets a synthetic key event carry the literal text
-    (CGEventKeyboardSetUnicodeString), which sidesteps both reasons Windows
-    needs the clipboard -- dropped characters and keyboard-layout translation --
-    and leaves whatever the user had copied exactly where it was.
+    **This used to type the text in directly** with
+    CGEventKeyboardSetUnicodeString, which sidesteps the two reasons Windows
+    needs the clipboard (dropped characters, keyboard-layout translation) and
+    left the user's clipboard untouched. Requirement 10 replaces it: one
+    clipboard write plus one chord costs the same no matter how much was said,
+    where typing pays per 20-character chunk and grows with the dictation.
 
-    For ordinary dictation this is also the quicker route: the clipboard path
-    pays a fixed ~0.22s in settle and hold delays regardless of length, while
-    this pays only per chunk of 20 characters. A long passage would eventually
-    overtake it; see paste_via_clipboard, kept for exactly that case.
-    """
-    if backend is None:
-        backend = _default_backend()
-    return type_with(text, backend)
-
-
-def type_partial(text: str, *, backend: PasteBackend | None = None) -> bool:
-    """Type settled words while the user is still speaking. See paste_core."""
-    if backend is None:
-        backend = _default_backend()
-    return _type_partial(text, backend)
-
-
-def paste_via_clipboard(text: str, *, backend: PasteBackend | None = None) -> bool:
-    """The clipboard + Cmd+V route. Replaces the user's clipboard.
-
-    Kept because it costs the same no matter how much was said, so it is the
-    better choice for a long dictation, and because it is the route Windows
-    uses -- one implementation, tested on both.
+    The clipboard the user had is saved and restored around the paste, so the
+    reason the typing route existed -- not clobbering it -- is preserved
+    without the per-character cost. See paste_core.paste_with.
     """
     if backend is None:
         backend = _default_backend()
     return paste_with(text, backend, CMD_V_SEQUENCE)
+
+
+#: The former name for the clipboard route, from when typing was the default.
+#: Kept so anything still calling it keeps working; they are the same thing now.
+paste_via_clipboard = paste_text
+
+
+def type_text(text: str, *, backend: PasteBackend | None = None) -> bool:
+    """The old direct-typing route. Not used by the app any more.
+
+    Kept because it is the only way to insert text into an app that refuses
+    synthetic Cmd+V, and because it is genuinely tested. Nothing in the
+    pipeline calls it.
+    """
+    if backend is None:
+        backend = _default_backend()
+    return type_with(text, backend)

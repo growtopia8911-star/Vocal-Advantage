@@ -9,7 +9,12 @@ from collections.abc import Iterable
 
 import numpy as np
 
-from vocal_advantage import cuda_dlls
+from vocal_advantage import backends, cuda_dlls
+
+#: Test seam, same idea as recorder.sd: bound once here and always called
+#: through this name, so a test can say "pretend this machine has MLX" without
+#: an Apple GPU. Never call backends.has_mlx() directly below.
+has_mlx = backends.has_mlx
 
 # Must match recorder.SAMPLE_RATE. Duplicated on purpose: importing recorder
 # here would drag sounddevice (and a real audio device) into every transcriber
@@ -109,17 +114,31 @@ _DEVICE_PLANS: dict[str, tuple[tuple[str, str], ...]] = {
     "auto": (("cuda", "int8_float16"), ("cpu", "int8")),
     "cuda": (("cuda", "int8_float16"), ("cpu", "int8")),
     "cpu": (("cpu", "int8"),),
+    # Apple Silicon. A different engine entirely -- see backends.MlxWhisperModel
+    # -- reached through the same ladder so a Metal failure demotes to the CPU
+    # exactly the way a CUDA failure does.
+    "metal": (("metal", "float16"), ("cpu", "int8")),
+    "mlx": (("metal", "float16"), ("cpu", "int8")),
 }
+
+#: The plan "auto" resolves to on an Apple Silicon Mac that has mlx-whisper.
+_MAC_GPU_PLAN = _DEVICE_PLANS["metal"]
 
 
 def _default_model_factory(model_name: str, device: str, compute_type: str):
-    """Build a real WhisperModel.
+    """Build the model for ``device`` -- MLX on Metal, CTranslate2 otherwise.
+
+    Both objects answer ``transcribe(audio, **kwargs) -> (segments, info)``, so
+    everything above this line is engine-agnostic.
 
     The faster_whisper import lives inside this function on purpose: it must
     not happen until cuda_dlls.prepare() has registered the CUDA DLL
     directories, and a module-scope import would fire the moment anything
     imported this file.
     """
+    if device == "metal":
+        return backends.MlxWhisperModel(model_name)
+
     cuda_dlls.prepare()  # idempotent; the import on the next line depends on it
     from faster_whisper import WhisperModel
 
@@ -170,6 +189,11 @@ class Transcriber:
             # attempt it, fail, and warn -- every launch, about something that
             # can never work. An explicit device="cuda" still tries, because an
             # explicit request deserves an explicit failure.
+            #
+            # Metal is reachable, but only through a different engine, and only
+            # if it is installed -- mlx-whisper is optional.
+            if has_mlx():
+                return _MAC_GPU_PLAN
             return _DEVICE_PLANS["cpu"]
         plan = _DEVICE_PLANS.get(key)
         if plan is None:

@@ -404,6 +404,11 @@ class FakeBackend:
         self.clipboard_text = text
         self._record("clipboard_set", text)
 
+    def get_clipboard(self):
+        """What the user had copied before the dictation (spec 10c)."""
+        self._record("clipboard_get", self.clipboard_text)
+        return self.clipboard_text
+
     def send_key(self, vk, down):
         self._record("key_down" if down else "key_up", vk)
         return self.send_result
@@ -415,11 +420,13 @@ def entries(fake, name):
 
 def test_paste_sequence_order_and_timing():
     fake = FakeBackend()
+    fake.clipboard_text = "prior contents"   # something to save and put back
 
     assert paste_win.paste_text("hello world", backend=fake) is True
 
     assert fake.log == [
         ("modifiers_down", False, 0.0),
+        ("clipboard_get", "prior contents", 0.0),  # 10c: read before overwriting
         ("clipboard_set", "hello world", 0.0),
         ("sleep", 0.1, 0.0),  # apps fetch the clipboard lazily
         ("key_down", paste_win.VK_LCONTROL, 0.1),
@@ -430,8 +437,11 @@ def test_paste_sequence_order_and_timing():
         ("sleep", 0.02, 0.14),
         ("key_up", paste_win.VK_LCONTROL, 0.16),
         ("sleep", 0.06, 0.16),  # let the hook swallow our own key events
+        ("sleep", 0.25, 0.22),  # let the app fetch it before taking it back
+        ("clipboard_set", "prior contents", 0.47),  # 10c: and put it back
     ]
-    assert fake.clipboard_text == "hello world"
+    # The transcript is gone again; the user's clipboard survived the dictation.
+    assert fake.clipboard_text == "prior contents"
 
 
 def test_injection_flag_is_set_throughout_and_cleared_at_the_end():
@@ -459,7 +469,9 @@ def test_it_waits_for_physically_held_modifiers_before_pasting():
         ("modifiers_down", True, 0.02),
         ("sleep", 0.01, 0.02),
         ("modifiers_down", False, 0.03),
-        ("clipboard_set", "hello", 0.03),
+        # The clipboard is read only once the modifiers are clear -- the wait
+        # comes first, which is what this test is pinning.
+        ("clipboard_get", None, 0.03),
     ]
 
 

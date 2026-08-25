@@ -71,6 +71,15 @@ class FakeRecorder:
         self.is_recording = False
         return self.audio
 
+    def snapshot(self):
+        """What the chunk pump reads on each tick while recording.
+
+        The rig's clip is shorter than one chunk, so nothing is ever emitted as
+        a rolling chunk and the whole utterance arrives as the remainder on
+        stop -- which is what keeps these tests asserting one transcribe call.
+        """
+        return self.audio if self.is_recording else np.empty(0, dtype=np.float32)
+
 
 class FakeTranscriber:
     """Stands in for transcriber.Transcriber.
@@ -144,9 +153,13 @@ class Rig:
     ) -> None:
         self.log: list[str] = []
         self.clock = FakeClock()
-        # 0.5s of silence at 16kHz.  The controller never looks inside it; it
-        # only hands it from the recorder to the transcriber.
-        self.audio = np.zeros(8000, dtype=np.float32)
+        # 0.5s of a loud tone at 16kHz. It used to be silence, because the
+        # controller never looked inside it -- it does now: requirement 8 trims
+        # silence off a chunk and skips an all-silent one entirely, so a rig
+        # built on np.zeros would exercise the skip path in every test.
+        self.audio = (
+            0.4 * np.sin(2 * np.pi * 220.0 * np.arange(8000, dtype=np.float32) / 16000)
+        ).astype(np.float32)
         self.recorder = FakeRecorder(self.log, self.audio, start_error=start_error)
         self.transcriber = FakeTranscriber(self.log, text=transcript, error=error)
         self.paster = FakePaster(self.log, ok=paste_ok)
@@ -373,10 +386,18 @@ def test_state_is_recording_while_the_key_is_held():
     assert rig.recorder.is_recording is True
 
 
-def test_the_recorders_audio_reaches_the_transcriber_untouched():
+def test_the_recorders_audio_reaches_the_transcriber_as_speech():
+    """Was "untouched"; requirement 8 now trims silence off both ends first.
+
+    So the assertion is what survives the trim rather than object identity: the
+    clip is all speech, so all of it must arrive, and it must arrive once.
+    """
     rig = Rig("f8")
     rig.drive([("down", "f8"), ("wait", 1.0), ("up", "f8")])
-    assert rig.transcriber.received == [rig.recorder.audio]
+    assert len(rig.transcriber.received) == 1
+    received = rig.transcriber.received[0]
+    assert received.size == rig.recorder.audio.size
+    np.testing.assert_allclose(received, rig.recorder.audio, rtol=1e-6)
 
 
 def test_empty_transcript_flashes_and_never_pastes():
@@ -499,82 +520,6 @@ def test_the_next_hold_after_a_failed_start_records_normally():
 
     assert rig.log == STARTED + PASTED
     assert rig.controller.state is State.IDLE
-
-
-# ---------------------------------------------------------------------------
-# Live dictation: a hook that runs on each tick while recording
-# ---------------------------------------------------------------------------
-
-
-def test_no_partial_hook_means_nothing_changes():
-    """Windows passes no hook, so its behaviour must be untouched."""
-    rig = Rig("f8")
-    rig.drive([("down", "f8"), ("tick",), ("tick",), ("wait", 1.0), ("up", "f8")])
-    assert rig.log == STARTED + PASTED
-
-
-def _rig_with_partial(hotkey="f8", **kwargs):
-    rig = Rig(hotkey, **kwargs)
-    calls = []
-    rig.controller = DictationController(
-        hotkey=parse_hotkey(hotkey),
-        recorder=rig.recorder,
-        transcriber=rig.transcriber,
-        paster=rig.paster,
-        indicator=rig.indicator,
-        min_duration_s=0.4,
-        max_duration_s=300.0,
-        clock=rig.clock,
-        on_partial=lambda: calls.append(rig.controller.state),
-    )
-    return rig, calls
-
-
-def test_the_partial_hook_runs_on_every_tick_while_recording():
-    rig, calls = _rig_with_partial()
-    rig.drive([("down", "f8"), ("tick",), ("tick",), ("tick",)])
-    assert calls == [State.RECORDING] * 3
-
-
-def test_the_partial_hook_does_not_run_while_idle():
-    """Nothing is being said, so there is nothing to transcribe."""
-    rig, calls = _rig_with_partial()
-    rig.drive([("tick",), ("tick",)])
-    assert calls == []
-
-
-def test_the_partial_hook_does_not_run_after_the_key_is_released():
-    rig, calls = _rig_with_partial()
-    rig.drive([("down", "f8"), ("tick",), ("wait", 1.0), ("up", "f8"), ("tick",)])
-    assert calls == [State.RECORDING], "one tick while held, none afterwards"
-
-
-def test_a_failing_partial_hook_does_not_break_the_dictation():
-    """A partial pass is a nicety. If it throws, the real transcript on release
-    still has to arrive -- losing what someone just said is unforgivable."""
-    rig = Rig("f8")
-    rig.controller = DictationController(
-        hotkey=parse_hotkey("f8"),
-        recorder=rig.recorder,
-        transcriber=rig.transcriber,
-        paster=rig.paster,
-        indicator=rig.indicator,
-        min_duration_s=0.4,
-        max_duration_s=300.0,
-        clock=rig.clock,
-        on_partial=lambda: (_ for _ in ()).throw(RuntimeError("partial blew up")),
-    )
-    rig.drive([("down", "f8"), ("tick",), ("wait", 1.0), ("up", "f8")])
-
-    assert rig.log == STARTED + PASTED
-    assert rig.controller.state is State.IDLE
-
-
-def test_the_watchdog_still_fires_with_a_partial_hook_attached():
-    rig, calls = _rig_with_partial()
-    rig.drive([("down", "f8"), ("wait", 301.0), ("tick",)])
-    assert rig.controller.state is State.IDLE
-    assert "transcriber.transcribe" in rig.log
 
 
 # ---------------------------------------------------------------------------
