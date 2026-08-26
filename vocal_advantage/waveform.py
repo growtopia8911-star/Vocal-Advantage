@@ -70,8 +70,22 @@ SCREEN_MARGIN = 64
 #: Ordinary speech sits near -30 dBFS. On a linear scale that is rms 0.03, which
 #: would move an 11px bar by half a pixel -- the pill would look broken while you
 #: were talking normally into it. Hence dB, and hence a ceiling well below 0.
-FLOOR_DB = -60.0
-CEIL_DB = -15.0
+#:
+#: **Widened 2026-08-26 because the old -60/-15 window was compressed at the
+#: top.** Real speech spans roughly -35 dB (quiet) to -18 dB (loud), and against
+#: -60/-15 that mapped to 56%-93% of bar height: everything said landed in the
+#: top half of the pill and volume differences barely moved it. Kevin's words
+#: were "can we make the lines more accurate in audio volume".
+#:
+#: -50 lifts the floor off room noise so quiet speech starts genuinely low, and
+#: -12 leaves headroom above a normal voice so raising it still has somewhere to
+#: go rather than pegging flat. The same speech now spans 39%-84%.
+#:
+#: These are reasoned, not measured -- the honest caveat. `tools/calibrate_
+#: levels.py` measures this microphone and this voice and prints the two values
+#: to put here, which is the only way to get them right rather than plausible.
+FLOOR_DB = -50.0
+CEIL_DB = -12.0
 
 # --- motion -----------------------------------------------------------------
 #: Per-frame easing coefficient, for a 60fps render loop. 0.25 is a ~66ms time
