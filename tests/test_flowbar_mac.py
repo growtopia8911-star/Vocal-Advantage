@@ -245,3 +245,69 @@ def test_a_dragged_panel_also_grows_upward():
         for width, height in ((78.0, 30.0), (200.0, 55.0), (420.0, 96.0))
     ]
     assert len(set(bottoms)) == 1
+
+
+# --- hover and click-through (task 7) ----------------------------------------
+#
+# `_hover_for` and `_contains` are pure given `_last_layout`/`_last_origin`, so
+# they are tested here with no cursor, no screen and no run loop -- exactly as
+# `_tick` (which reads the real cursor) is not: see the module docstring's
+# testing note. `_tick` itself is hand-checked, same as the click-through and
+# focus guarantees it drives.
+
+
+def test_hover_is_empty_when_the_cursor_is_elsewhere():
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    bar._last_layout = None
+    assert bar._hover_for(0.0, 0.0) == ""
+
+
+def test_hover_names_the_item_under_the_cursor():
+    from vocal_advantage import panel
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),
+         panel.StripItem("cancel", "Cancel", "Esc")),
+    )
+    bar._last_origin = (100.0, 200.0)
+    item = bar._last_layout.items[1]
+    # Panel space -> screen space. The panel is flipped, so y counts down from
+    # the top edge, and the top edge is origin_y + height on a Mac.
+    x = 100.0 + item.hover_rect.x + item.hover_rect.w / 2.0
+    y = 200.0 + 96.0 - (item.hover_rect.y + item.hover_rect.h / 2.0)
+    assert bar._hover_for(x, y) == "cancel"
+
+
+def test_hover_is_empty_just_outside_the_panel():
+    from vocal_advantage import panel
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),),
+    )
+    bar._last_origin = (100.0, 200.0)
+    # Just above the top edge of the panel in screen space.
+    assert bar._hover_for(300.0, 200.0 + 96.0 + 1.0) == ""
+
+
+def test_contains_is_false_when_there_is_no_layout_yet():
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    bar._last_layout = None
+    assert bar._contains(0.0, 0.0) is False
+
+
+def test_contains_is_true_inside_the_last_drawn_rect_and_false_outside_it():
+    from vocal_advantage import panel
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    bar._last_layout = panel.layout(420.0, 96.0, 12.0, 1.0, "Recording", ())
+    bar._last_origin = (100.0, 200.0)
+    assert bar._contains(300.0, 240.0) is True
+    assert bar._contains(50.0, 240.0) is False
+
+
+def test_click_through_is_the_default():
+    """Gate 4a. The three guards in this file's docstring are why."""
+    import inspect
+    source = inspect.getsource(flowbar_mac.FlowBar)
+    assert "setIgnoresMouseEvents_(True)" in source

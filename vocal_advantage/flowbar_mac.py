@@ -37,6 +37,7 @@ try:  # pragma: no cover - absence is only reachable off macOS
         NSApplication,
         NSBezierPath,
         NSColor,
+        NSEvent,
         NSFont,
         NSFontAttributeName,
         NSForegroundColorAttributeName,
@@ -54,7 +55,7 @@ try:  # pragma: no cover - absence is only reachable off macOS
     from Foundation import NSMakeRect, NSString
 except ImportError:  # pragma: no cover - not macOS
     objc = None
-    NSApplication = NSBezierPath = NSColor = NSFont = None
+    NSApplication = NSBezierPath = NSColor = NSEvent = NSFont = None
     NSFontAttributeName = NSForegroundColorAttributeName = None
     NSGradient = NSGraphicsContext = None
     NSMutableParagraphStyle = NSPanel = NSParagraphStyleAttributeName = None
@@ -185,6 +186,8 @@ class _PillView(NSView):
         if self is None:
             return None
         self._data = None
+        self._hover = ""
+        self._on_click = None
         return self
 
     def isFlipped(self) -> bool:
@@ -198,20 +201,31 @@ class _PillView(NSView):
 
     def setData_(self, data) -> None:
         self._data = data
+        self._hover = data.hover
 
     def setMovable_(self, movable) -> None:
         self._movable = bool(movable)
 
     def mouseDown_(self, event) -> None:
-        """Start a native window drag.
+        """Dispatch a click on a hovered strip item, else start a window drag.
 
-        Only ever reached while move mode is on: the rest of the time the panel
-        has ignoresMouseEvents set and no mouse event arrives here at all.
+        Reachable in two situations now: the cursor is over the panel (`_tick`
+        dropped ignoresMouseEvents for exactly that reason), or move mode is on
+        and ignoresMouseEvents is off for the whole panel. A click on a hovered
+        item takes priority and never starts a drag; nothing here fires unless
+        one of those two conditions put us on the receiving end of a mouse
+        event in the first place -- the rest of the time ignoresMouseEvents is
+        set and no mouse event arrives here at all.
 
         performWindowDragWithEvent_ hands the whole drag to AppKit, which is
         both less code and better behaved than tracking mouseDragged_ by hand --
         it gets screen edges and multiple displays right for free.
         """
+        hover = getattr(self, "_hover", "")
+        callback = getattr(self, "_on_click", None)
+        if hover and callback is not None:
+            callback(hover)
+            return
         if getattr(self, "_movable", False):
             self.window().performWindowDragWithEvent_(event)
 
@@ -424,17 +438,29 @@ class FlowBar:
         position: str = "bottom-centre",
         fps: int = FPS,
         point=None,
+        on_click=None,
     ) -> None:
         self._indicator = indicator
         self._position = position if position in POSITIONS else "bottom-centre"
         self._fps = fps
         #: (centre_x, bottom_y) once dragged, else None to use `position`.
         self._point = list(point) if point else None
+        #: Called with a strip item's id on click. Task 8 supplies it; this
+        #: task only builds the channel, so None (the default) is a no-op.
+        self._on_click = on_click
         self._panel = None
         self._view = None
         self._timer = None
         self._movable = False
         self._width = float(wf.PILL_WIDTH)
+        #: What was last drawn, for hit-testing the *next* tick's cursor
+        #: sample against. One frame stale, which at 60fps nobody can see.
+        self._last_layout = None
+        self._last_origin = (0.0, 0.0)
+        #: Whether the cursor was inside the panel as of the last tick that
+        #: changed it -- so the ignoresMouseEvents flag is only touched on a
+        #: transition, not every frame.
+        self._interactive = False
 
     def open(self) -> None:
         height = float(wf.PILL_HEIGHT)
@@ -473,6 +499,7 @@ class FlowBar:
         self._view = _PillView.alloc().initWithFrame_(
             NSMakeRect(0, 0, self._width, height)
         )
+        self._view._on_click = self._on_click
         self._panel.setContentView_(self._view)
         # Not makeKeyAndOrderFront_: that would activate us and steal focus.
         self._panel.orderFrontRegardless()
@@ -490,11 +517,59 @@ class FlowBar:
         self._timer = timer
 
     def _tick(self) -> None:
-        frame = self._indicator.next_frame()
+        location = NSEvent.mouseLocation()
+        hover = self._hover_for(location.x, location.y)
+        inside = self._contains(location.x, location.y)
+        if inside != self._interactive:
+            self._interactive = inside
+            # Move bar mode owns this flag while it is on; never fight it.
+            if not self.movable:
+                self._panel.setIgnoresMouseEvents_(not inside)
+
+        frame = self._indicator.next_frame(hover=hover)
         if abs(frame.width - self._width) > 0.5:
             self._resize(frame.width, frame.height)
         self._view.setData_(frame)
         self._view.setNeedsDisplay_(True)
+
+        # Recorded for the *next* tick's hit-test: `_hover_for`/`_contains`
+        # must be pure, so they read this rather than the frame just drawn.
+        self._last_origin = self._origin(frame.width, frame.height)
+        self._last_layout = panel.layout(
+            frame.width, frame.height, frame.radius, frame.open,
+            flowbar.STATUS_TEXT.get(frame.state, ""), frame.strip,
+        )
+
+    def _hover_for(self, screen_x: float, screen_y: float) -> str:
+        """Which strip item the cursor is over, in screen coordinates.
+
+        Split out from the tick and given no side effects so it can be tested
+        without a cursor, a screen or a run loop.
+        """
+        placed = self._last_layout
+        if placed is None:
+            return ""
+        origin_x, origin_y = self._last_origin
+        x = screen_x - origin_x
+        # The view is flipped; the window's origin is its bottom-left.
+        y = origin_y + placed.height - screen_y
+        return panel.hit_test(placed, x, y) or ""
+
+    def _contains(self, screen_x: float, screen_y: float) -> bool:
+        """Whether a screen point falls inside the last drawn panel.
+
+        This is what decides click-through, not `_hover_for`: the panel
+        should stop ignoring clicks as soon as the cursor is anywhere over it,
+        not only over a strip item.
+        """
+        placed = self._last_layout
+        if placed is None:
+            return False
+        origin_x, origin_y = self._last_origin
+        return (
+            origin_x <= screen_x < origin_x + placed.width
+            and origin_y <= screen_y < origin_y + placed.height
+        )
 
     def _origin(self, width: float, height: float):
         """Where the pill goes: a dragged point if there is one, else a preset."""

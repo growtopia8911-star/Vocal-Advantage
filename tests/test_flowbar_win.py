@@ -409,3 +409,66 @@ def test_writes_a_png_to_look_at(tmp_path):
     out = tmp_path / "panel.png"
     render_frame(a_panel_frame(), 420, 96).save(out)
     assert out.stat().st_size > 0
+
+
+# --- hover and click-through (task 7) ----------------------------------------
+#
+# `_hover_for` and `_contains` only touch `panel`, not Win32, so -- like
+# `render_frame` above -- they are plain data and can be checked from a Mac.
+# The cursor poll and the WS_EX_TRANSPARENT toggle in `_draw` cannot: they are
+# unverified here, same as the rest of this file's window code.
+
+
+def test_hover_is_empty_when_the_cursor_is_elsewhere():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = None
+    assert bar._hover_for(0.0, 0.0) == ""
+
+
+def test_hover_names_the_item_under_the_cursor():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),
+         panel.StripItem("cancel", "Cancel", "Esc")),
+    )
+    bar._last_origin = (100.0, 200.0)
+    item = bar._last_layout.items[1]
+    # Windows screen space is already top-left origin, so this needs no flip --
+    # unlike the macOS twin of this test.
+    x = 100.0 + item.hover_rect.x + item.hover_rect.w / 2.0
+    y = 200.0 + item.hover_rect.y + item.hover_rect.h / 2.0
+    assert bar._hover_for(x, y) == "cancel"
+
+
+def test_hover_is_empty_just_outside_the_panel():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),),
+    )
+    bar._last_origin = (100.0, 200.0)
+    assert bar._hover_for(300.0, 199.0) == ""
+
+
+def test_contains_is_false_when_there_is_no_layout_yet():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = None
+    assert bar._contains(0.0, 0.0) is False
+
+
+def test_contains_is_true_inside_the_last_drawn_rect_and_false_outside_it():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = panel.layout(420.0, 96.0, 12.0, 1.0, "Recording", ())
+    bar._last_origin = (100.0, 200.0)
+    assert bar._contains(300.0, 240.0) is True
+    assert bar._contains(50.0, 240.0) is False
+
+
+def test_click_through_is_the_default():
+    """The Windows twin of the macOS gate 4a guard: WS_EX_TRANSPARENT is set
+    the moment the window is created, before any cursor poll has run."""
+    import inspect
+    from vocal_advantage import flowbar_win
+    source = inspect.getsource(flowbar_win.FlowBar._create_window)
+    assert "WS_EX_TRANSPARENT" in source

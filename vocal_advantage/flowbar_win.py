@@ -161,6 +161,8 @@ if sys.platform == "win32":  # pragma: no cover - Windows only
     _user32.SetWindowLongW.restype = wintypes.LONG
     _user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
     _user32.ReleaseCapture.argtypes = []
+    _user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+    _user32.GetCursorPos.restype = wintypes.BOOL
 
     class WNDCLASSEXW(ctypes.Structure):
         _fields_ = [
@@ -497,19 +499,31 @@ class FlowBar:
 
     def __init__(
         self, indicator, position: str = "bottom-centre", fps: int = FPS,
-        point=None,
+        point=None, on_click=None,
     ) -> None:
         self._indicator = indicator
         self._position = position if position in POSITIONS else "bottom-centre"
         self._fps = fps
         #: (centre_x, bottom_y) once dragged, else None to use `position`.
         self._point = list(point) if point else None
+        #: Called with a strip item's id on click. Task 8 supplies it; this
+        #: task only builds the channel, so None (the default) is a no-op.
+        self._on_click = on_click
         self._movable = False
         self._hwnd = None
         self._width = int(wf.PILL_WIDTH)
         self._stop = threading.Event()
         self._thread = None
         self._wndproc = None      # must outlive the window or Windows calls freed memory
+        #: What was last drawn, for hit-testing the *next* poll's cursor
+        #: sample against, and what the window procedure reads to dispatch a
+        #: click. One frame stale, which at 60fps nobody can see.
+        self._last_layout = None
+        self._last_origin = (0.0, 0.0)
+        self._hover = ""
+        #: Whether the cursor was inside the panel as of the last draw that
+        #: changed it -- so WS_EX_TRANSPARENT is only touched on a transition.
+        self._interactive = False
 
     def open(self) -> None:
         """Start the render thread. Returns as soon as it is running."""
@@ -601,7 +615,23 @@ class FlowBar:
         _user32.ShowWindow(self._hwnd, SW_SHOWNOACTIVATE)
 
     def _draw(self) -> None:
-        frame = self._indicator.next_frame()
+        point = POINT()
+        _user32.GetCursorPos(ctypes.byref(point))
+        hover = self._hover_for(float(point.x), float(point.y))
+        inside = self._contains(float(point.x), float(point.y))
+        if inside != self._interactive:
+            self._interactive = inside
+            # Move bar mode owns this bit while it is on; never fight it.
+            if not self.movable:
+                style = _user32.GetWindowLongW(self._hwnd, GWL_EXSTYLE)
+                style = (
+                    (style & ~WS_EX_TRANSPARENT) if inside
+                    else (style | WS_EX_TRANSPARENT)
+                )
+                _user32.SetWindowLongW(self._hwnd, GWL_EXSTYLE, style)
+        self._hover = hover
+
+        frame = self._indicator.next_frame(hover=hover)
         width = int(round(frame.width))
         height = int(round(frame.height))
         if width != self._width:
@@ -648,6 +678,45 @@ class FlowBar:
         _gdi32.DeleteObject(bitmap)
         _gdi32.DeleteDC(mem_dc)
         _user32.ReleaseDC(None, screen_dc)
+
+        # Recorded for the *next* draw's hit-test: `_hover_for`/`_contains`
+        # must be pure, so they read this rather than the frame just drawn.
+        self._last_origin = self._origin(width, height)
+        self._last_layout = panel.layout(
+            float(width), float(height), frame.radius, frame.open,
+            flowbar.STATUS_TEXT.get(frame.state, ""), frame.strip,
+        )
+
+    def _hover_for(self, screen_x: float, screen_y: float) -> str:
+        """Which strip item the cursor is over, in screen coordinates.
+
+        Pure, so it is testable without a window or a cursor. Windows screen
+        coordinates are already top-left origin, so -- unlike the macOS twin
+        of this method -- no y-flip is needed.
+        """
+        placed = self._last_layout
+        if placed is None:
+            return ""
+        origin_x, origin_y = self._last_origin
+        return panel.hit_test(
+            placed, screen_x - origin_x, screen_y - origin_y
+        ) or ""
+
+    def _contains(self, screen_x: float, screen_y: float) -> bool:
+        """Whether a screen point falls inside the last drawn panel.
+
+        This is what decides click-through, not `_hover_for`: the window
+        should stop ignoring clicks as soon as the cursor is anywhere over
+        it, not only over a strip item.
+        """
+        placed = self._last_layout
+        if placed is None:
+            return False
+        origin_x, origin_y = self._last_origin
+        return (
+            origin_x <= screen_x < origin_x + placed.width
+            and origin_y <= screen_y < origin_y + placed.height
+        )
 
     def _origin(self, width: int, height: int):
         """Where the pill goes: a dragged point if there is one, else a preset."""
@@ -713,12 +782,22 @@ _WINDOWS: dict = {}
 def _default_wndproc(hwnd, message, wparam, lparam):  # pragma: no cover - Windows
     if message == WM_LBUTTONDOWN:
         bar = _WINDOWS.get(int(hwnd) if hwnd else 0)
-        if bar is not None and bar.movable:
-            # Hand the drag to Windows rather than tracking the mouse
-            # ourselves: it runs its own modal move loop, so there is no
-            # capture to leak, no timer, and it behaves like every other
-            # window on the machine -- including snapping and Esc to cancel.
-            _user32.ReleaseCapture()
-            _user32.SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
-            return 0
+        if bar is not None:
+            # A click on a hovered strip item takes priority and never starts
+            # a drag. Task 8 wires the callback; until then `_on_click` is
+            # None and this is a no-op, exactly like move mode being off.
+            hover = getattr(bar, "_hover", "")
+            callback = getattr(bar, "_on_click", None)
+            if hover and callback is not None:
+                callback(hover)
+                return 0
+            if bar.movable:
+                # Hand the drag to Windows rather than tracking the mouse
+                # ourselves: it runs its own modal move loop, so there is no
+                # capture to leak, no timer, and it behaves like every other
+                # window on the machine -- including snapping and Esc to
+                # cancel.
+                _user32.ReleaseCapture()
+                _user32.SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
+                return 0
     return _user32.DefWindowProcW(hwnd, message, wparam, lparam)
