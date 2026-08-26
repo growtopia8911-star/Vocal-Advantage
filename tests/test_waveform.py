@@ -141,14 +141,15 @@ def test_idle_heights_are_a_flat_row():
     assert wf.idle_heights(13) == (wf.IDLE_HEIGHT,) * 13
 
 
-def test_idle_bars_are_lines_not_dots():
-    # Tied to the real geometry rather than a taste bound. A round-capped bar
-    # drawn no taller than it is wide IS a circle, so the resting row silently
-    # becomes dots -- which is what happened when the pill was made smaller and
-    # the idle height was left alone.
-    max_half = wf.PILL_HEIGHT / 2 - wf.BAR_MARGIN_Y
+def test_idle_bars_are_dots_not_lines():
+    # The reverse of what this asserted until 2026-08-26, and reversed on
+    # purpose: Wispr Flow rests as dots and Kevin prefers it. Tied to the real
+    # geometry rather than a taste bound -- a round-capped bar drawn no taller
+    # than it is wide IS a circle, and that is the mechanism being relied on.
+    from vocal_advantage import panel
+    max_half = panel.COMPACT_HEIGHT * panel.PEAK_FRACTION / 2.0
     drawn_height = wf.IDLE_HEIGHT * max_half * 2
-    assert drawn_height >= wf.BAR_WIDTH * 2
+    assert drawn_height <= wf.BAR_WIDTH
 
 
 def test_idle_bars_stay_well_short_of_full_height():

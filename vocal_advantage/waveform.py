@@ -88,11 +88,19 @@ EASE_ALPHA = 0.25
 #: "the last second or two" is the half of the brief that governs here.
 SCROLL_FRAMES = 6
 
-#: Resting height, as a fraction of the 11.5px half-height: ~7px of visible line.
-#: This has a hard floor, not just a taste range. A round-capped bar whose drawn
-#: height falls to its own width is a circle, and the resting row reads as a row
-#: of dots rather than the short lines the design asks for.
-IDLE_HEIGHT = 0.32
+#: Resting height, as a fraction of the band's half-height.
+#:
+#: **This used to be 0.32, chosen so the resting row drew as short LINES, and
+#: the comment here warned against exactly what it now does.** Wispr Flow rests
+#: as a row of dots and Kevin prefers it, so the old floor is deliberately
+#: crossed rather than accidentally: a round-capped bar drawn no taller than it
+#: is wide IS a circle, which is the whole mechanism.
+#:
+#: 0.10 against the compact pill's 9.66pt half-height gives a drawn height of
+#: ~1.9pt against a 2.0pt bar width -- just under, so every bar the microphone
+#: is not driving renders as a dot. Speech lifts them back into lines, so the
+#: trace reads as dots at rest and a waveform while you talk.
+IDLE_HEIGHT = 0.10
 
 # --- the transcribing sweep -------------------------------------------------
 #: Deliberately capped well below what speech reaches, so this state can never
