@@ -808,6 +808,70 @@ def test_a_flow_bar_that_will_not_start_is_survivable(monkeypatch, capsys):
     assert "unaffected" in capsys.readouterr().err
 
 
+# --------------------------------------------------------------------------
+# _make_activate -- the Flow Bar's on_click dispatch (Task 8)
+# --------------------------------------------------------------------------
+#
+# The brief's one named risk: `{"stop": controller.request_stop, ...}.get(id)`
+# type-checks and looks right, but a version that forgot to *call* the result
+# -- handing the callback a bare `dict.get` -- would return the method instead
+# of invoking it, and every click would silently do nothing. Nothing in
+# tests/test_controller_cancel.py could catch that: it drives
+# Controller.request_stop/request_cancel directly and never goes near
+# `activate`. These tests call the actual dispatcher `_make_activate` builds.
+
+
+class _ClickController:
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def request_stop(self) -> None:
+        self.calls.append("stop")
+
+    def request_cancel(self) -> None:
+        self.calls.append("cancel")
+
+
+def test_activate_stop_calls_request_stop():
+    controller = _ClickController()
+    activate = va_main._make_activate(controller)
+
+    activate("stop")
+
+    assert controller.calls == ["stop"]
+
+
+def test_activate_cancel_calls_request_cancel():
+    controller = _ClickController()
+    activate = va_main._make_activate(controller)
+
+    activate("cancel")
+
+    assert controller.calls == ["cancel"]
+
+
+def test_activate_on_an_unknown_id_is_a_harmless_no_op():
+    controller = _ClickController()
+    activate = va_main._make_activate(controller)
+
+    activate("something_else")
+
+    assert controller.calls == []
+
+
+def test_a_second_click_is_a_second_call_not_a_stale_closure():
+    """Two different ids through the same `activate` must each reach their
+    own method -- guards against a version that captures `action` once and
+    reuses it, which would make the second click repeat the first."""
+    controller = _ClickController()
+    activate = va_main._make_activate(controller)
+
+    activate("stop")
+    activate("cancel")
+
+    assert controller.calls == ["stop", "cancel"]
+
+
 def test_a_tray_icon_that_will_not_start_is_survivable(monkeypatch, capsys):
     import vocal_advantage.tray_mac as tray_mac
     import vocal_advantage.tray_win as tray_win

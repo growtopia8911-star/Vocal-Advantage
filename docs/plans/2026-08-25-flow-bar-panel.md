@@ -245,33 +245,44 @@ merely has a test file. Method for each group is under **Verification** below.
       cap, separated by a 1 pt divider.
 - [x] 2c. Key cap chips are darker than the strip they sit on.
 - [x] 2d. The right group is absent in every state but `RECORDING`.
-- [ ] 2e. ~~The `Stop` cap shows the configured hotkey, and follows a change to
-      it.~~ First half only. `Indicator._hotkey` is set once, in `__init__`,
-      and has no setter; `HotkeyChanger._change()` (`main.py`) calls
-      `controller.set_hotkey(spec)` but never touches the indicator it was
-      built with. Changing the hotkey from the tray leaves the strip showing
-      the old key cap until the app restarts. Found by reading the code, not
-      by running it — out of scope for this task (`flowbar.py` is off limits
-      here), left as a gap for whoever picks up gate 6.
+- [x] 2e. The `Stop` cap shows the configured hotkey, and follows a change to
+      it. **Fixed** in `ae08a3a` ("Keep the Flow Bar's Stop cap in step with a
+      runtime hotkey change"): `Indicator.set_keys(hotkey, cancel_key)` is a
+      plain thread-safe attribute assignment, matching how `_status`/
+      `_state_name` already work, applying the identical
+      `"" if CANCEL_KEY in spec.keys else CANCEL_KEY` rule the construction
+      sites use. `HotkeyChanger._change()` calls it right beside
+      `controller.set_hotkey(spec)`. Covered by
+      `test_set_keys_updates_the_stop_cap_on_the_next_frame`,
+      `test_changing_hotkey_to_esc_removes_the_cancel_control`, and
+      `test_changing_hotkey_away_from_esc_restores_the_cancel_control`
+      (`tests/test_flowbar_strip.py`), plus
+      `test_a_hotkey_change_reaches_the_indicator` and
+      `test_a_hotkey_change_to_esc_drops_the_cancel_control`
+      (`tests/test_main.py`), all passing.
 
 ### 3. The two shapes
 
 - [x] 3a. Idle rests as a 78 × 30 full-round pill.
 - [x] 3b. Recording grows it to the panel; width, height and radius all ease.
-- [ ] 3c. ~~The bottom edge does not move during the grow.~~ True on macOS
-      (`pill_origin`/`point_origin` there anchor on Cocoa's bottom-left window
-      origin, which does not depend on height). **False on Windows** for the
-      default, un-dragged position: `flowbar_win.pill_origin` takes no
-      `height` argument and hardcodes `wf.PILL_HEIGHT` (30) into its y, so
-      `_reposition` walks the window's bottom edge down by
-      `PANEL_HEIGHT - PILL_HEIGHT` (66 pt) as it grows to the panel. Windows'
-      own `point_origin` (the *dragged* path) does this correctly, computing
-      `y = bottom_y - height`; `pill_origin` alone is missing the same fix.
-      Every Windows install starts with `flow_bar_point: null` (the preset
-      path), so this hits by default, not only in an edge case. Found by
-      tracing `_origin` → `pill_origin` by hand; not run on Windows.
-      `flowbar_win.py` is off limits to this task, so left unfixed and flagged
-      here rather than silently ticked.
+- [x] 3c. The bottom edge does not move during the grow. **Fixed** in
+      `78da93b` ("Pin the Windows Flow Bar's bottom edge as it grows into the
+      panel"): `flowbar_win.pill_origin` now takes a live `height` parameter
+      and uses it in place of the hardcoded `wf.PILL_HEIGHT`, and
+      `FlowBar._origin` passes the live height through on the preset
+      (un-dragged) path the same way it already did for a dragged point.
+      **What is verified, precisely:** the *origin arithmetic* — `y + height`
+      (the bottom edge) is identical between the 30pt pill and the 96pt panel
+      for all three preset positions and for a dragged point, and the top
+      edge is shown to fall (not rise) as height grows — pinned by
+      `test_bottom_edge_is_identical_at_pill_height_and_panel_height`,
+      `test_the_top_edge_rises_as_the_panel_grows`, and
+      `test_bottom_edge_is_identical_for_a_dragged_point_too`
+      (`tests/test_flowbar_win.py`), all passing on this Mac (pure Python, no
+      Win32 needed). **What is still unverified:** the actual Win32 window —
+      `CreateWindowExW`, `SetWindowPos` — staying visually put on a real
+      screen. That is Win32 plumbing per the note below, and this tick does
+      not claim it.
 - [x] 3d. The strip never draws squashed: its alpha rides the width.
 - [x] 3e. The trace is one 69-slot buffer; the pill windows its newest 15, and
       the grow reveals history rather than clearing it.

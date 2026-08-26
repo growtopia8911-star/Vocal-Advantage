@@ -781,6 +781,29 @@ def _make_flow_bar(cfg: dict, indicator, on_click=None):
         return None
 
 
+def _make_activate(controller):
+    """The Flow Bar's `on_click`: perform a control by the id `panel.hit_test`
+    returned.
+
+    A click and the key it names go through the same request, so they cannot
+    drift into doing two different things. Module-level and taking the
+    controller as an argument -- rather than a closure inline at each call
+    site -- so this dispatch has exactly one implementation to get right and
+    one place a test can reach it: a bare `{"stop": controller.request_stop,
+    ...}.get(item_id)` type-checks and looks correct but returns the method
+    instead of calling it, and does nothing when clicked.
+    """
+    def activate(item_id: str) -> None:
+        action = {
+            "stop": controller.request_stop,
+            "cancel": controller.request_cancel,
+        }.get(item_id)
+        if action is not None:
+            action()
+
+    return activate
+
+
 def _settings_opener(config_path: Path):
     """The "Settings..." action, or None where there is no window to open.
 
@@ -1016,22 +1039,9 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     listener = HotkeyListener(spec, on_key)
     listener.start()
 
-    def activate(item_id: str) -> None:
-        """Perform a Flow Bar control, by the id `panel.hit_test` returned.
-
-        A click and the key it names go through the same request, so they
-        cannot drift into doing two different things.
-        """
-        action = {
-            "stop": controller.request_stop,
-            "cancel": controller.request_cancel,
-        }.get(item_id)
-        if action is not None:
-            action()
-
     # UI last: by here the hotkey already works, so anything below failing
     # costs decoration and never dictation.
-    bar = _make_flow_bar(cfg, indicator, on_click=activate)
+    bar = _make_flow_bar(cfg, indicator, on_click=_make_activate(controller))
     changer = HotkeyChanger(
         listener=listener, spec=spec, on_key=on_key, controller=controller,
         indicator=indicator, config_path=config_path,
@@ -1208,21 +1218,8 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         warn("No NSApplication, so there is no menu bar icon and no overlay.")
         warn(traceback.format_exc())
 
-    def activate(item_id: str) -> None:
-        """Perform a Flow Bar control, by the id `panel.hit_test` returned.
-
-        A click and the key it names go through the same request, so they
-        cannot drift into doing two different things.
-        """
-        action = {
-            "stop": controller.request_stop,
-            "cancel": controller.request_cancel,
-        }.get(item_id)
-        if action is not None:
-            action()
-
     bar = (
-        _make_flow_bar(cfg, indicator, on_click=activate)
+        _make_flow_bar(cfg, indicator, on_click=_make_activate(controller))
         if app is not None else None
     )
     changer = HotkeyChanger(
