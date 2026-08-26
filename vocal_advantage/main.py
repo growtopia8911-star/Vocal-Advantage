@@ -1195,13 +1195,14 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     say("Model ready.")
     _warm_up_ai_cleanup(cfg)
 
+    paster = RecordingPaster(paste_win, history)
     controller = _build_controller(
         cfg, spec,
         recorder=recorder,
         transcriber=transcriber,
         # paste_win itself satisfies the paster protocol: a module-level
         # paste_text(str) -> bool is the whole interface.
-        paster=RecordingPaster(paste_win, history),
+        paster=paster,
         indicator=SoundingIndicator(indicator, player),
         dictionary=dictionary,
     )
@@ -1355,6 +1356,7 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     say("Model ready.")
     _warm_up_ai_cleanup(cfg)
 
+    paster = RecordingPaster(paste_mac, history)
     controller = _build_controller(
         cfg, spec,
         recorder=recorder,
@@ -1362,7 +1364,7 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         # The module, not paste_mac.paste_text: the paster protocol is an
         # object with a .paste_text(str) -> bool, and a module-level function
         # of that name is exactly what satisfies it -- same as paste_win above.
-        paster=RecordingPaster(paste_mac, history),
+        paster=paster,
         indicator=SoundingIndicator(indicator, player),
         dictionary=dictionary,
     )
