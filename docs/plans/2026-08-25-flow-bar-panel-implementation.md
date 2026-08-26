@@ -33,6 +33,7 @@ gate number referenced below is from that document.
 - **Click-through is the default state.** It is dropped only while the cursor is inside the panel, and restored on leaving. Gate 4a, 4e.
 - **Colours live in `panel.py` as 0–255 integer triples.** AppKit callers divide by 255. This stops the two renderers holding different values, as `PILL_FILL_RGB` does today: `(0.97, 0.965, 0.945)` in the mac file and `(247, 246, 241)` in the Windows one.
 - **Every measurement is from `design-research/superwhisper/assets/`**, ÷2 from a 2× capture. Do not "improve" these numbers.
+- **Four tests inspect source rather than behaviour, on purpose.** `test_module_is_pure`, `test_the_renderer_computes_no_layout_of_its_own`, `test_panel_height_is_taken_from_the_frame_not_the_constant` and `test_click_through_is_the_default` guard architectural constraints (gates 5a, 5c, 4a) that produce no observable runtime difference until the exact thing they forbid ships to the wrong platform. They are deliberate, not a smell — do not rewrite them as behavioural tests, and do not delete them.
 - **Tests must be watched failing before the implementation is written.** If a new test file's first red is `ModuleNotFoundError`, that proves the file runs and nothing about any assertion in it — keep going.
 
 ---
@@ -134,7 +135,7 @@ BAR_COUNT = 15
 #: (4px each in a 2x capture); ours were 1.5/2.2, a 1.47:1 ratio that looked
 #: airier and less like the thing being copied.
 BAR_WIDTH = 2.0
-BAR_GAP = 2.2
+BAR_GAP = 2.0
 #: The full trace history, in bars. The panel draws all of them; the pill draws
 #: a window onto the newest few, so growing the panel *reveals* history rather
 #: than resetting the trace.
@@ -151,15 +152,11 @@ BUFFER_BARS = 69
 BAR_MARGIN_Y = 3.5
 ```
 
-Then set `BAR_GAP = 2.0` (it is written as `2.2` above only so that Step 4
-catches a half-applied edit).
-
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `python -m pytest tests/test_waveform.py -v`
 
-Expected: PASS, all of them. If `test_bars_and_gaps_are_equal_width` still
-fails, `BAR_GAP` was left at 2.2 — that is the deliberate trap in Step 3.
+Expected: PASS, all of them.
 
 - [ ] **Step 5: Check nothing else asserted the old numbers**
 
