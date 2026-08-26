@@ -508,10 +508,64 @@ def test_contains_is_false_when_there_is_no_layout_yet():
 
 def test_contains_is_true_inside_the_last_drawn_rect_and_false_outside_it():
     bar = FlowBar.__new__(FlowBar)
-    bar._last_layout = panel.layout(420.0, 96.0, 12.0, 1.0, "Recording", ())
+    # A non-empty strip (so there is something to click) is what this test is
+    # about geometrically -- see the click-eating tests below for what happens
+    # when there is nothing in the strip to click.
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),),
+    )
     bar._last_origin = (100.0, 200.0)
     assert bar._contains(300.0, 240.0) is True
     assert bar._contains(50.0, 240.0) is False
+
+
+# --- click-eating with nothing to click (final review issue 3) --------------
+#
+# `_contains` used to test only `placed.width`/`placed.height`, never whether
+# `placed.items` is non-empty. So the resting pill (which is never in
+# CONTROL_STATES) and the TRANSCRIBING panel (which is, by design, in
+# PANEL_STATES but not CONTROL_STATES -- see `flowbar.CONTROL_STATES`) both
+# stopped being click-through the instant the cursor crossed them, even
+# though the window procedure would then find `hover == ""` and do nothing: a
+# swallowed click, including one meant for the taskbar, which sits right
+# under the resting pill's position.
+#
+# The same expression also closes a related timing bug: `panel.layout` builds
+# `items` whenever `strip.h > 0`, but `panel.strip_alpha` (what `_draw_strip`
+# gates drawing on) does not go positive until `strip.h` is most of the way
+# to `STRIP_HEIGHT` -- so a part-grown strip's items used to be clickable
+# before they were visible. Gating on `panel.strip_alpha(...) > 0` as well as
+# `items` being non-empty makes "clickable" and "visible" the same rule.
+
+
+def test_a_transcribing_panel_with_no_controls_does_not_swallow_clicks():
+    bar = FlowBar.__new__(FlowBar)
+    # TRANSCRIBING: the panel is fully open (so the strip band itself is at
+    # full height) but offers zero controls -- `flowbar.Indicator._strip`
+    # returns `()` outside `CONTROL_STATES`.
+    bar._last_layout = panel.layout(420.0, 96.0, 12.0, 1.0, "Transcribing", ())
+    bar._last_origin = (100.0, 200.0)
+    # Well inside the panel's bounding box.
+    assert bar._contains(300.0, 240.0) is False
+
+
+def test_the_resting_pill_does_not_swallow_clicks():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = panel.layout(78.0, 30.0, 15.0, 0.0, "", ())
+    bar._last_origin = (100.0, 200.0)
+    assert bar._contains(120.0, 210.0) is False
+
+
+def test_a_recording_panels_stop_control_does_swallow_clicks():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),
+         panel.StripItem("cancel", "Cancel", "Esc")),
+    )
+    bar._last_origin = (100.0, 200.0)
+    assert bar._contains(300.0, 240.0) is True
 
 
 def test_click_through_is_the_default():

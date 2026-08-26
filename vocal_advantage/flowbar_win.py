@@ -713,14 +713,28 @@ class FlowBar:
         ) or ""
 
     def _contains(self, screen_x: float, screen_y: float) -> bool:
-        """Whether a screen point falls inside the last drawn panel.
+        """Whether a screen point falls inside the last drawn panel, AND the
+        panel actually has something in it to click.
 
         This is what decides click-through, not `_hover_for`: the window
         should stop ignoring clicks as soon as the cursor is anywhere over
-        it, not only over a strip item.
+        it, not only over a strip item -- but only in a state that has
+        controls at all. Without the `placed.items` check, the resting pill
+        and the TRANSCRIBING panel (which opens but, by design, offers zero
+        controls) both ate every click that crossed them, including ones
+        meant for whatever sits underneath -- the taskbar, at the resting
+        pill's position.
+
+        `panel.strip_alpha(placed.strip.h) > 0.0` is the same test
+        `_draw_strip` gates drawing on, so a part-grown strip cannot be
+        clickable before it is visible: `panel.layout` builds `items` as soon
+        as the strip has any height at all, well before `strip_alpha` says
+        there is anything to see.
         """
         placed = self._last_layout
         if placed is None:
+            return False
+        if not placed.items or panel.strip_alpha(placed.strip.h) <= 0.0:
             return False
         origin_x, origin_y = self._last_origin
         return (
