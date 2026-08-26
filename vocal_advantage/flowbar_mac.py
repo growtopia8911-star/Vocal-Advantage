@@ -290,20 +290,31 @@ class _PillView(NSView):
         if data.text and data.text_alpha > 0.01:
             self._draw_message(data, width, height)
         if getattr(self, "_movable", False):
-            self._draw_move_outline(width, height)
+            self._draw_move_outline(width, height, data.radius)
 
-    def _draw_move_outline(self, width: float, height: float) -> None:
-        """Say loudly that clicks are being intercepted right now."""
+    def _draw_move_outline(self, width: float, height: float, radius: float) -> None:
+        """Say loudly that clicks are being intercepted right now.
+
+        The radius came from `(height - MOVE_OUTLINE_WIDTH) / 2.0` -- full
+        round, which was right when the bar was always the 30pt pill. At the
+        96pt panel that computed a radius of 47 against the panel's actual
+        `radius` of 12, so the outline sliced across the waveform band and
+        cut the corners off the strip instead of tracing the panel's real
+        shape. `radius` is `data.radius` -- the same value `drawRect_` clips
+        the whole panel to -- inset by half the stroke width so the outline's
+        curve stays concentric with that clip rather than bulging outside it.
+        """
         inset = MOVE_OUTLINE_WIDTH / 2.0
         red, green, blue = MOVE_OUTLINE_RGB
         NSColor.colorWithCalibratedRed_green_blue_alpha_(red, green, blue, 1.0).set()
+        outline_radius = max(0.0, radius - inset)
         outline = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             NSMakeRect(
                 inset, inset,
                 width - MOVE_OUTLINE_WIDTH, height - MOVE_OUTLINE_WIDTH,
             ),
-            (height - MOVE_OUTLINE_WIDTH) / 2.0,
-            (height - MOVE_OUTLINE_WIDTH) / 2.0,
+            outline_radius,
+            outline_radius,
         )
         outline.setLineWidth_(MOVE_OUTLINE_WIDTH)
         outline.stroke()
@@ -313,9 +324,10 @@ class _PillView(NSView):
         if band.h <= 0.0:
             return
         centre_y = band.y + band.h / 2.0
-        # 69% of band height at peak, mirrored -- so the tallest bar's half is
-        # 0.345 of the band. Measured off superwhisper, not chosen.
-        max_half = band.h * 0.345
+        # `panel.PEAK_FRACTION` is 69% of band height at peak, mirrored -- so
+        # the tallest bar's half is half of that. See panel.py for why this
+        # is not a bare float here.
+        max_half = band.h * panel.PEAK_FRACTION / 2.0
 
         _colour(panel.BAR_RGB, data.bar_alpha).set()
         for x, normalised in zip(
@@ -413,8 +425,12 @@ class _PillView(NSView):
         style.setAlignment_(NSTextAlignmentCenter)
         attributes = {
             NSFontAttributeName: NSFont.systemFontOfSize_(MESSAGE_FONT_SIZE),
-            NSForegroundColorAttributeName:
-                NSColor.colorWithCalibratedWhite_alpha_(0.08, data.text_alpha),
+            # Was an 8%-white ink, correct against the old warm-paper pill and
+            # a 1.35:1 contrast against `panel.PILL_FILL_RGB` -- the near-black
+            # ground this panel redesign introduced. `panel.TEXT_RGB` is what
+            # the strip's own labels already use, and taking it from `panel`
+            # closes the last colour either renderer held itself.
+            NSForegroundColorAttributeName: _colour(panel.TEXT_RGB, data.text_alpha),
             NSParagraphStyleAttributeName: style,
         }
         text = NSString.stringWithString_(data.text)

@@ -165,6 +165,15 @@ def test_key_caps_are_darker_than_the_strip_they_sit_on():
     assert sum(panel.CAP_FILL_RGB) < sum(panel.STRIP_BOTTOM_RGB)
 
 
+def test_peak_fraction_is_measured_at_69_percent():
+    """Final review issue 5 (gate 5a). Both renderers used to hardcode
+    `0.345` -- half of a 69%-of-band-height peak amplitude -- with the same
+    comment repeated in both files. That is exactly the drift `panel.py`
+    exists to prevent, and it determines a drawn rect, so the one true value
+    lives here."""
+    assert panel.PEAK_FRACTION == 0.69
+
+
 def test_module_is_pure():
     """Gate 5c. The whole value of this module is that it runs anywhere.
 

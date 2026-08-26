@@ -354,6 +354,24 @@ was run. Left unticked rather than claimed.
 ### 5. Parity
 
 - [x] 5a. Both renderers take every rect from `panel.py`; neither computes one.
+      **This was not literally true when first ticked, and the final review
+      caught both exceptions.** `flowbar_mac._draw_move_outline` computed its
+      own radius — `(height - MOVE_OUTLINE_WIDTH) / 2.0`, full-round, correct
+      only when the bar was always the 30pt pill — instead of taking
+      `data.radius` from the same `panel.layout(...)` call every other rect in
+      the file comes from; at the 96pt panel that drew a 47pt-radius outline
+      against a 12pt-radius panel, slicing across the waveform band. And both
+      `flowbar_mac._draw_bars` and `flowbar_win.render_frame` held the
+      peak-bar amplitude as a bare `0.345`, comment and all, duplicated
+      verbatim in both files — a value that determines a drawn rect, kept
+      outside `panel.py` regardless. Both are fixed now: the move outline
+      takes `data.radius` (inset by half the stroke width so its curve stays
+      concentric with the panel's own clip), and `panel.PEAK_FRACTION = 0.69`
+      is the one place the amplitude lives, with both renderers reading it as
+      `band.h * panel.PEAK_FRACTION / 2.0`. `test_move_outline_uses_the_panels_own_radius`
+      and `test_the_bar_amplitude_comes_from_panels_shared_constant` (both
+      renderers' test files) pin it. With both closed, the gate's literal
+      wording holds.
 - [x] 5b. `render_frame` produces the panel at 420 × 96 on this Mac.
 - [x] 5c. Nothing in `panel.py` imports AppKit, Win32 or Pillow.
 

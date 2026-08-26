@@ -452,6 +452,17 @@ def test_the_renderer_computes_no_layout_of_its_own():
     assert "BAND_HEIGHT" not in source
 
 
+def test_the_bar_amplitude_comes_from_panels_shared_constant():
+    """Final review issue 5 (gate 5a). `0.345` (half of `panel.PEAK_FRACTION`)
+    used to be a bare float here, duplicated verbatim -- comment included --
+    in flowbar_mac.py. Exactly the drift `panel.py` exists to prevent, on a
+    value that determines a drawn rect."""
+    import inspect
+    source = inspect.getsource(render_frame)
+    assert "panel.PEAK_FRACTION" in source
+    assert "0.345" not in source
+
+
 def test_writes_a_png_to_look_at(tmp_path):
     """The honest substitute for eyeballing this on Windows. Not an assertion
     about beauty -- it is the fixture the spec's verification table names."""

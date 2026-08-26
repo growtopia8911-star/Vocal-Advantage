@@ -65,6 +65,14 @@ BAND_HEIGHT = 57.0
 HAIRLINE = 1.0
 STRIP_HEIGHT = 38.0
 
+#: The tallest bar reaches 69% of the band's height, mirrored about its
+#: centre line -- so a bar's half-height at peak is half of that, 0.345 of
+#: the band. Measured off superwhisper's captures, not chosen. Both
+#: renderers used to hold this as a bare `0.345` float, comment and all,
+#: which is exactly the drift this module exists to prevent on a value that
+#: determines a drawn rect.
+PEAK_FRACTION = 0.69
+
 # --- palette ----------------------------------------------------------------
 # 0-255 integer triples. AppKit callers divide by 255. Kept in one
 # representation so the two renderers cannot hold different values.

@@ -369,3 +369,139 @@ def test_click_through_is_the_default():
     import inspect
     source = inspect.getsource(flowbar_mac.FlowBar)
     assert "setIgnoresMouseEvents_(True)" in source
+
+
+# --- the move outline follows the panel's real radius (final review issue 4)
+#
+# `_draw_move_outline` used to compute its own radius as
+# `(height - MOVE_OUTLINE_WIDTH) / 2.0` -- full-round, correct back when the
+# bar was always a 30pt pill. At panel height (96pt) that is radius 47
+# against a panel whose real radius (`data.radius`) is 12, so the blue
+# move-mode outline sliced across the waveform band and cut the corners off
+# the strip. `NSBezierPath` and `NSColor` are swapped for fakes here: the
+# point is what radius gets asked for, not what gets painted, and this way
+# the test runs with no window and no graphics context.
+
+
+@darwin_only
+def test_move_outline_uses_the_panels_own_radius():
+    from unittest import mock
+
+    class _FakePath:
+        def setLineWidth_(self, width):
+            pass
+
+        def stroke(self):
+            pass
+
+    calls = []
+
+    class _FakeBezierPath:
+        @staticmethod
+        def bezierPathWithRoundedRect_xRadius_yRadius_(rect, x_radius, y_radius):
+            calls.append((x_radius, y_radius))
+            return _FakePath()
+
+    class _FakeColour:
+        def set(self):
+            pass
+
+    class _FakeNSColor:
+        @staticmethod
+        def colorWithCalibratedRed_green_blue_alpha_(r, g, b, a):
+            return _FakeColour()
+
+    view = flowbar_mac._PillView.alloc().init()
+    view._movable = True
+
+    with mock.patch.object(flowbar_mac, "NSBezierPath", _FakeBezierPath), \
+         mock.patch.object(flowbar_mac, "NSColor", _FakeNSColor):
+        view._draw_move_outline(420.0, 96.0, 12.0)  # panel size, panel.PANEL_RADIUS
+
+    assert calls, "no rounded rect was built"
+    x_radius, y_radius = calls[0]
+    inset = flowbar_mac.MOVE_OUTLINE_WIDTH / 2.0
+    assert x_radius == pytest.approx(12.0 - inset)
+    assert y_radius == pytest.approx(12.0 - inset)
+    # The old bug, pinned so it cannot come back quietly: full-round at panel
+    # height is 47, wildly off the panel's actual 12pt radius.
+    assert x_radius != pytest.approx((96.0 - flowbar_mac.MOVE_OUTLINE_WIDTH) / 2.0)
+
+
+# --- the shared peak-bar fraction (final review issue 5, gate 5a) -----------
+
+
+def test_the_bar_amplitude_comes_from_panels_shared_constant():
+    """`0.345` (half of `panel.PEAK_FRACTION`) used to be a bare float here,
+    duplicated verbatim -- comment included -- in flowbar_win.py. Exactly the
+    drift `panel.py` exists to prevent, on a value that determines a drawn
+    rect."""
+    import inspect
+    source = inspect.getsource(flowbar_mac._PillView._draw_bars)
+    assert "panel.PEAK_FRACTION" in source
+    assert "0.345" not in source
+
+
+# --- message text contrast (final review issue 1) ----------------------------
+#
+# `_draw_message` drew message text as an 8%-white ink -- correct against the
+# old warm-paper pill, and a 1.35:1 contrast against `panel.PILL_FILL_RGB`
+# (11, 11, 11), the near-black ground this branch introduced. Every flash()
+# call site, including controller.py's PASTE_FAILED_MESSAGE (the app's only
+# "your dictation did not land" channel), went through this and drew
+# invisibly.
+#
+# Rendered offscreen with `bitmapImageRepForCachingDisplayInRect_` +
+# `cacheDisplayInRect_toBitmapImageRep_`, not a hand-built NSGraphicsContext:
+# the latter skips the view's `isFlipped` transform, so it would not exercise
+# the real draw path this bug lives in.
+
+
+@darwin_only
+def test_message_text_is_legible_against_the_near_black_pill():
+    from vocal_advantage import flowbar, panel
+
+    width, height = 260.0, float(wf.PILL_HEIGHT)
+    view = flowbar_mac._PillView.alloc().initWithFrame_(
+        flowbar_mac.NSMakeRect(0, 0, width, height)
+    )
+    view.setData_(
+        flowbar.Frame(
+            state=flowbar.MESSAGE,
+            heights=wf.idle_heights(wf.BAR_COUNT),
+            text="could not paste - press Ctrl+V",
+            width=width,
+            pill_alpha=0.96,
+            bar_alpha=0.0,
+            text_alpha=1.0,
+            open=0.0,
+            height=height,
+            radius=panel.PILL_RADIUS,
+        )
+    )
+
+    rect = flowbar_mac.NSMakeRect(0, 0, width, height)
+    bitmap = view.bitmapImageRepForCachingDisplayInRect_(rect)
+    view.cacheDisplayInRect_toBitmapImageRep_(rect, bitmap)
+    pixels_wide, pixels_high = bitmap.pixelsWide(), bitmap.pixelsHigh()
+
+    def brightness(x, y):
+        colour = bitmap.colorAtX_y_(x, y)
+        return (
+            colour.redComponent() + colour.greenComponent() + colour.blueComponent()
+        ) / 3.0
+
+    mid_y = pixels_high // 2
+    # Left edge, mid-height: inside the pill body, clear of both the rounded
+    # corner cutout and the centred text -- the pill's own ground colour.
+    ground = brightness(20, mid_y)
+    # A band around vertical centre, where `_draw_message` centres the text,
+    # scanned across the width but staying clear of the rounded corners.
+    band_y = range(mid_y - 8, mid_y + 8)
+    band_x = range(30, pixels_wide - 30)
+    brightest = max(brightness(x, y) for x in band_x for y in band_y)
+
+    assert brightest > ground + 0.3, (
+        f"brightest text pixel ({brightest:.3f}) is not legible against the "
+        f"pill ground ({ground:.3f}) -- the flash() message would be invisible"
+    )

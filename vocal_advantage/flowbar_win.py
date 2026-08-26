@@ -350,12 +350,12 @@ def render_frame(frame, width: int, height: int) -> Image.Image:
     bar_alpha = int(round(_clamp01(frame.bar_alpha) * 255))
     if bar_alpha > 2 and placed.band.h > 0:
         centre_y = (placed.band.y + placed.band.h / 2.0) * scale
-        # 69% of band height at peak, mirrored -- so the tallest bar's half is
-        # 0.345 of the band. Measured off superwhisper, not chosen. Taken from
-        # `placed.band`, not the raw pill height, so the resting pill (whose
-        # band *is* the whole pill -- see `panel.bands`) and the open panel
-        # use the identical rule.
-        max_half = placed.band.h * 0.345 * scale
+        # `panel.PEAK_FRACTION` is 69% of band height at peak, mirrored -- so
+        # the tallest bar's half is half of that. See panel.py for why this
+        # is not a bare float here. Taken from `placed.band`, not the raw
+        # pill height, so the resting pill (whose band *is* the whole pill --
+        # see `panel.bands`) and the open panel use the identical rule.
+        max_half = placed.band.h * panel.PEAK_FRACTION / 2.0 * scale
         bar_width = wf.BAR_WIDTH * scale
         for x, normalised in zip(
             wf.bar_layout(placed.band.w * scale, len(frame.heights),
