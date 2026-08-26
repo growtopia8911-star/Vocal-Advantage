@@ -57,6 +57,14 @@ MUTEX_NAME = r"Local\VocalAdvantageSingleInstance"
 ERROR_ALREADY_EXISTS = 183
 
 TICK_INTERVAL_S = 1.0  # how often the controller's 300s watchdog gets a chance to fire
+#: Enqueued by a Flow Bar click (`_make_activate`) to wake `controller_loop`
+#: immediately, the way a keypress already does. `request_stop`/`request_cancel`
+#: only set a flag on the controller -- nothing about that unblocks a loop
+#: parked in `events.get(timeout=...)`, so without this a click could sit
+#: unacted-on for up to `tick_interval_s`. An `object()`, not a string or a
+#: (key_name, is_down) tuple, so the loop can tell it apart from both a real
+#: key event and the `None` shutdown sentinel without risking a collision.
+WAKE_SENTINEL = object()
 # The live loop's wake-up interval, NOT the transcription cadence -- that is
 # self-paced inside LiveDictation from the measured cost of each pass, so fast
 # hardware transcribes as often as it can afford and slow hardware backs off.
@@ -447,6 +455,15 @@ def controller_loop(
         if item is None:
             break
 
+        if item is WAKE_SENTINEL:
+            # A Flow Bar click already recorded its request on the controller
+            # (`request_stop`/`request_cancel`); this is what unblocks a loop
+            # sitting in `get()` so it is acted on now, the way a keypress
+            # already is, instead of waiting up to `tick_interval_s`.
+            _safe_call("watchdog tick", controller.tick)
+            next_tick = clock() + tick_interval_s
+            continue
+
         key_name, is_down = item
         _safe_call("key event", controller.on_key_event, key_name, is_down)
 
@@ -781,7 +798,7 @@ def _make_flow_bar(cfg: dict, indicator, on_click=None):
         return None
 
 
-def _make_activate(controller):
+def _make_activate(controller, events: "queue.Queue"):
     """The Flow Bar's `on_click`: perform a control by the id `panel.hit_test`
     returned.
 
@@ -792,6 +809,13 @@ def _make_activate(controller):
     one place a test can reach it: a bare `{"stop": controller.request_stop,
     ...}.get(item_id)` type-checks and looks correct but returns the method
     instead of calling it, and does nothing when clicked.
+
+    `events` is the same queue `controller_loop` drains. `request_stop`/
+    `request_cancel` only set a flag on the controller; enqueuing
+    `WAKE_SENTINEL` is what wakes a loop parked in `events.get()` so the click
+    is acted on now rather than at the next scheduled tick -- up to
+    `TICK_INTERVAL_S` later, which is long enough that a mis-aimed second
+    click can land on Cancel and throw the dictation away.
     """
     def activate(item_id: str) -> None:
         action = {
@@ -800,6 +824,7 @@ def _make_activate(controller):
         }.get(item_id)
         if action is not None:
             action()
+            events.put(WAKE_SENTINEL)
 
     return activate
 
@@ -1041,7 +1066,7 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
 
     # UI last: by here the hotkey already works, so anything below failing
     # costs decoration and never dictation.
-    bar = _make_flow_bar(cfg, indicator, on_click=_make_activate(controller))
+    bar = _make_flow_bar(cfg, indicator, on_click=_make_activate(controller, events))
     changer = HotkeyChanger(
         listener=listener, spec=spec, on_key=on_key, controller=controller,
         indicator=indicator, config_path=config_path,
@@ -1219,7 +1244,7 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         warn(traceback.format_exc())
 
     bar = (
-        _make_flow_bar(cfg, indicator, on_click=_make_activate(controller))
+        _make_flow_bar(cfg, indicator, on_click=_make_activate(controller, events))
         if app is not None else None
     )
     changer = HotkeyChanger(

@@ -834,7 +834,8 @@ class _ClickController:
 
 def test_activate_stop_calls_request_stop():
     controller = _ClickController()
-    activate = va_main._make_activate(controller)
+    events: "queue.Queue" = queue.Queue()
+    activate = va_main._make_activate(controller, events)
 
     activate("stop")
 
@@ -843,7 +844,8 @@ def test_activate_stop_calls_request_stop():
 
 def test_activate_cancel_calls_request_cancel():
     controller = _ClickController()
-    activate = va_main._make_activate(controller)
+    events: "queue.Queue" = queue.Queue()
+    activate = va_main._make_activate(controller, events)
 
     activate("cancel")
 
@@ -852,11 +854,13 @@ def test_activate_cancel_calls_request_cancel():
 
 def test_activate_on_an_unknown_id_is_a_harmless_no_op():
     controller = _ClickController()
-    activate = va_main._make_activate(controller)
+    events: "queue.Queue" = queue.Queue()
+    activate = va_main._make_activate(controller, events)
 
     activate("something_else")
 
     assert controller.calls == []
+    assert events.empty(), "an id that dispatches nothing must wake nothing"
 
 
 def test_a_second_click_is_a_second_call_not_a_stale_closure():
@@ -864,12 +868,68 @@ def test_a_second_click_is_a_second_call_not_a_stale_closure():
     own method -- guards against a version that captures `action` once and
     reuses it, which would make the second click repeat the first."""
     controller = _ClickController()
-    activate = va_main._make_activate(controller)
+    events: "queue.Queue" = queue.Queue()
+    activate = va_main._make_activate(controller, events)
 
     activate("stop")
     activate("cancel")
 
     assert controller.calls == ["stop", "cancel"]
+
+
+# --------------------------------------------------------------------------
+# A click must wake `controller_loop`, not just set a flag (final review
+# issue 2)
+# --------------------------------------------------------------------------
+#
+# `request_stop`/`request_cancel` only set `Controller._requested`; nothing
+# about that unblocks a loop parked in `events.get(timeout=...)`. The hotkey
+# path has no such gap -- a keypress is *enqueued*, which is exactly what
+# wakes `get()`. Left alone, a clicked Stop can sit unacted-on for up to
+# `TICK_INTERVAL_S` (1.0s in production), long enough that a mis-aimed second
+# click can land on Cancel and throw the dictation away --
+# `test_only_the_latest_request_is_kept` documents that exact loss.
+
+
+def test_activate_enqueues_a_wake_sentinel_not_merely_a_flag():
+    """The click path must put *something* on `events`, the way a keypress
+    already does -- not rely on `request_stop` alone, which only sets a flag
+    `controller_loop` has no reason to notice before its next scheduled tick.
+    """
+    controller = _ClickController()
+    events: "queue.Queue" = queue.Queue()
+    activate = va_main._make_activate(controller, events)
+
+    activate("stop")
+
+    assert controller.calls == ["stop"]
+    item = events.get_nowait()
+    assert item is va_main.WAKE_SENTINEL
+
+
+def test_a_click_wakes_the_loop_before_it_would_otherwise_tick():
+    """Behavioural proof, not just a queue-contents check: run the real
+    `controller_loop` with a long tick interval, click, and confirm `tick()`
+    actually ran. If the click only set a flag, the only item ever queued
+    before shutdown is the `None` sentinel, the loop breaks on it without
+    ever calling `tick()`, and this would see zero ticks."""
+    controller = FakeController()
+    # `_make_activate`'s dispatch dict reads both attributes unconditionally,
+    # so FakeController (which has no state machine) needs harmless stand-ins.
+    controller.request_stop = lambda: None
+    controller.request_cancel = lambda: None
+    events: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    thread = _start_loop(controller, events, stop, tick_interval_s=10.0)
+
+    activate = va_main._make_activate(controller, events)
+    activate("stop")
+    events.put(None)  # shutdown, queued right behind the click
+
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    _, ticks = controller.snapshot()
+    assert ticks >= 1, "the click must wake the loop, not wait for the next tick"
 
 
 def test_a_tray_icon_that_will_not_start_is_survivable(monkeypatch, capsys):

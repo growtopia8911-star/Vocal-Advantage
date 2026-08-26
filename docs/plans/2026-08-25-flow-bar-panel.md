@@ -301,6 +301,26 @@ merely has a test file. Method for each group is under **Verification** below.
       left the controller `IDLE`, the recorder stopped, nothing transcribed or
       pasted; Stop left it `IDLE` with a transcription and a paste. See
       **Verification**.
+      **Re-ticked after the final review's issue 2.** The original
+      demonstration pumped `controller.tick()` by hand, which hid a real gap:
+      `request_stop`/`request_cancel` only set a flag, and nothing woke
+      `controller_loop` out of `events.get(timeout=...)` to notice it, so a
+      clicked `Stop` could sit unacted-on for up to `TICK_INTERVAL_S` (1.0s in
+      production) — long enough for a mis-aimed second click to land on
+      `Cancel` and throw the dictation away, exactly what
+      `test_only_the_latest_request_is_kept` guards against for the flag
+      itself. `_make_activate` now also takes `events` and enqueues a
+      `WAKE_SENTINEL` after calling `request_stop`/`request_cancel`, and
+      `controller_loop` acts on that sentinel by calling `controller.tick()`
+      immediately, the same way it already reacts to a real key event —
+      **no on-screen click was performed; this is still a wiring-level
+      claim.** What was tested, in `tests/test_main.py`:
+      `test_activate_enqueues_a_wake_sentinel_not_merely_a_flag` (the click
+      puts `WAKE_SENTINEL` on the same queue `controller_loop` drains, not
+      only a flag), and `test_a_click_wakes_the_loop_before_it_would_otherwise_tick`
+      (the real `controller_loop`, given a 10s tick interval, still calls
+      `tick()` before it would otherwise have woken — proof the queue item is
+      what unblocks it, not the passage of time).
 - [x] 4d. Neither click activates this process or moves focus. Static at
       window-creation time on both platforms, not something the click path
       can affect either way: macOS builds the panel
