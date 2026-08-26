@@ -56,13 +56,13 @@ def a_frame(**overrides):
 # --- pill_origin ------------------------------------------------------------
 
 def test_bottom_centre_is_horizontally_centred():
-    x, _ = pill_origin("bottom-centre", 78, SCREEN_W, SCREEN_H)
+    x, _ = pill_origin("bottom-centre", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
     assert x + 78 / 2 == pytest.approx(SCREEN_W / 2, abs=1)
 
 
 def test_bottom_left_and_right_sit_a_margin_in():
-    left, _ = pill_origin("bottom-left", 78, SCREEN_W, SCREEN_H)
-    right, _ = pill_origin("bottom-right", 78, SCREEN_W, SCREEN_H)
+    left, _ = pill_origin("bottom-left", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
+    right, _ = pill_origin("bottom-right", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
     assert left == SIDE_MARGIN
     assert right + 78 == SCREEN_W - SIDE_MARGIN
 
@@ -70,28 +70,77 @@ def test_bottom_left_and_right_sit_a_margin_in():
 def test_y_is_measured_downward_from_the_top():
     # The macOS twin measures upward from the bottom. Getting this backwards
     # puts the pill off the top of the screen, and only on Windows.
-    _, y = pill_origin("bottom-centre", 78, SCREEN_W, SCREEN_H)
+    _, y = pill_origin("bottom-centre", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
     assert y == SCREEN_H - wf.SCREEN_MARGIN - wf.PILL_HEIGHT
     assert 0 < y < SCREEN_H
 
 
 def test_the_whole_pill_is_on_screen():
     for position in ("bottom-centre", "bottom-left", "bottom-right"):
-        x, y = pill_origin(position, 78, SCREEN_W, SCREEN_H)
+        x, y = pill_origin(position, 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
         assert 0 <= x and x + 78 <= SCREEN_W
         assert 0 <= y and y + wf.PILL_HEIGHT <= SCREEN_H
 
 
 def test_an_unknown_position_falls_back_to_centre():
-    unknown, _ = pill_origin("nowhere", 78, SCREEN_W, SCREEN_H)
-    centre, _ = pill_origin("bottom-centre", 78, SCREEN_W, SCREEN_H)
+    unknown, _ = pill_origin("nowhere", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
+    centre, _ = pill_origin("bottom-centre", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
     assert unknown == centre
 
 
 def test_a_widened_pill_stays_centred():
-    narrow, _ = pill_origin("bottom-centre", 78, SCREEN_W, SCREEN_H)
-    wide, _ = pill_origin("bottom-centre", 240, SCREEN_W, SCREEN_H)
+    narrow, _ = pill_origin("bottom-centre", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
+    wide, _ = pill_origin("bottom-centre", 240, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
     assert narrow + 78 / 2 == pytest.approx(wide + 240 / 2, abs=1)
+
+
+# --- the bottom edge must not move as the panel grows (gate 3c) -------------
+#
+# The panel opens upward from a stationary bottom edge. `pill_origin` used to
+# hardcode `wf.PILL_HEIGHT` regardless of the height it was actually asked
+# for, so the bottom edge (y + height) slid down by ~66pt as the panel grew
+# from the 30pt pill to the 96pt panel. Correct on macOS already, because
+# AppKit's y is up and the anchor there is the bottom edge directly; here y is
+# top-left and down, so the anchor is `screen_height - SCREEN_MARGIN` and the
+# top edge (`y`) must fall as `height` rises to keep the bottom edge fixed.
+
+
+def test_bottom_edge_is_identical_at_pill_height_and_panel_height():
+    """Gate 3c. `y + height` -- the bottom edge -- must be the same whether
+    the bar is the resting 30pt pill or the fully grown 96pt panel, for every
+    preset position."""
+    for position in ("bottom-centre", "bottom-left", "bottom-right"):
+        x_pill, y_pill = pill_origin(
+            position, 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H
+        )
+        x_panel, y_panel = pill_origin(
+            position, panel.PANEL_WIDTH, panel.PANEL_HEIGHT, SCREEN_W, SCREEN_H
+        )
+        assert y_pill + wf.PILL_HEIGHT == y_panel + panel.PANEL_HEIGHT, position
+
+
+def test_the_top_edge_rises_as_the_panel_grows():
+    """y must DECREASE as height grows -- the sign a first instinct gets
+    backwards in a top-left, y-down coordinate system."""
+    _, y_pill = pill_origin(
+        "bottom-centre", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H
+    )
+    _, y_panel = pill_origin(
+        "bottom-centre", panel.PANEL_WIDTH, panel.PANEL_HEIGHT, SCREEN_W, SCREEN_H
+    )
+    assert y_panel < y_pill
+
+
+def test_bottom_edge_is_identical_for_a_dragged_point_too():
+    """Same invariant through `point_origin`, which already took a height --
+    this pins that it is genuinely the live frame height doing the work, not
+    a coincidence of the clamp."""
+    point = [400.0, 500.0]
+    x_pill, y_pill = point_origin(point, 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
+    x_panel, y_panel = point_origin(
+        point, panel.PANEL_WIDTH, panel.PANEL_HEIGHT, SCREEN_W, SCREEN_H
+    )
+    assert y_pill + wf.PILL_HEIGHT == y_panel + panel.PANEL_HEIGHT == 500.0
 
 
 # --- render_frame -----------------------------------------------------------

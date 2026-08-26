@@ -203,13 +203,23 @@ def set_dpi_awareness() -> None:
         )
 
 
-def pill_origin(position: str, width: float, screen_width: int, screen_height: int):
+def pill_origin(
+    position: str, width: float, height: float, screen_width: int, screen_height: int
+):
     """Top-left corner of the pill, in Windows screen coordinates (y is down).
 
     The macOS twin measures from the bottom up, because that is how AppKit's
     coordinates run. Same result on screen, opposite arithmetic -- which is
     exactly the sort of thing that silently puts the bar off the top of one
     machine, hence a test for each.
+
+    ``height`` is the *live* frame height, not a hardcoded ``wf.PILL_HEIGHT``
+    -- gate 3c: the panel opens upward from a stationary bottom edge. The
+    anchor is ``screen_height - SCREEN_MARGIN`` (the bottom edge), and ``y``
+    -- the top edge -- must fall as ``height`` rises to keep that bottom edge
+    fixed while the pill grows into the 96pt panel. Getting the sign backwards
+    here reads as a plausible picture (the bar still appears, still animates)
+    and only shows up as the bottom edge sliding down the screen.
     """
     if position == "bottom-left":
         x = SIDE_MARGIN
@@ -217,7 +227,7 @@ def pill_origin(position: str, width: float, screen_width: int, screen_height: i
         x = screen_width - width - SIDE_MARGIN
     else:
         x = (screen_width - width) / 2.0
-    return int(round(x)), int(round(screen_height - wf.SCREEN_MARGIN - wf.PILL_HEIGHT))
+    return int(round(x)), int(round(screen_height - wf.SCREEN_MARGIN - height))
 
 
 def point_origin(point, width: float, height: float, screen_width: int,
@@ -724,7 +734,7 @@ class FlowBar:
         screen_h = _user32.GetSystemMetrics(SM_CYSCREEN)
         if self._point is not None:
             return point_origin(self._point, width, height, screen_w, screen_h)
-        return pill_origin(self._position, width, screen_w, screen_h)
+        return pill_origin(self._position, width, height, screen_w, screen_h)
 
     # -- move mode ----------------------------------------------------------
 
