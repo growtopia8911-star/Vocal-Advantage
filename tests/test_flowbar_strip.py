@@ -160,6 +160,55 @@ def test_no_cancel_control_when_esc_is_itself_the_hotkey():
     assert [item.id for item in frame.strip] == ["stop"]
 
 
+# --- a runtime hotkey change (gate 2e) ----------------------------------------
+#
+# The tray's "Change hotkey" menu item can swap the hotkey while the app is
+# running. There was no setter, so the Stop cap kept showing the old key until
+# the app restarted -- the bar lying about the one thing it is on screen to say.
+
+
+def test_set_keys_updates_the_stop_cap_on_the_next_frame():
+    """Gate 2e. After a runtime hotkey change, the very next frame's Stop cap
+    must show the new key, not the one the Indicator was constructed with."""
+    indicator = an_indicator(hotkey="F8")
+    indicator.show_recording()
+    settle(indicator)
+
+    indicator.set_keys("ctrl+alt+d", "Esc")
+
+    frame = indicator.next_frame()
+    stop = next(item for item in frame.strip if item.id == "stop")
+    assert stop.cap == "ctrl+alt+d"
+
+
+def test_changing_hotkey_to_esc_removes_the_cancel_control():
+    """CRITICAL: `_handle_down` gives the hotkey precedence over Cancel, so a
+    Cancel control that cannot fire would be a lie -- exactly the invariant
+    `test_no_cancel_control_when_esc_is_itself_the_hotkey` enforces at
+    construction time. The runtime setter must apply the identical rule."""
+    indicator = an_indicator(hotkey="F8", cancel_key="Esc")
+    indicator.show_recording()
+    settle(indicator)
+
+    indicator.set_keys("esc", "")
+
+    frame = indicator.next_frame()
+    assert [item.id for item in frame.strip] == ["stop"]
+
+
+def test_changing_hotkey_away_from_esc_restores_the_cancel_control():
+    indicator = an_indicator(hotkey="esc", cancel_key="")
+    indicator.show_recording()
+    settle(indicator)
+
+    indicator.set_keys("F9", "Esc")
+
+    frame = indicator.next_frame()
+    assert [item.id for item in frame.strip] == ["stop", "cancel"]
+    cancel = next(item for item in frame.strip if item.id == "cancel")
+    assert cancel.cap == "Esc"
+
+
 def test_transcribing_shows_no_controls():
     """Gate 2d, and the reasoning LEGEND_STATES already carried: once the
     model has the audio, no key stops it and none bins the result, so

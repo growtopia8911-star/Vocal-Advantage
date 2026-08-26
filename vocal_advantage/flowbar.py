@@ -214,6 +214,25 @@ class Indicator:
         self._state_name = MESSAGE
         self._commands.put((MESSAGE, message))
 
+    def set_keys(self, hotkey: str, cancel_key: str) -> None:
+        """Update the strip's key caps after a runtime hotkey change.
+
+        Plain attribute assignment, exactly like `_status`/`_state_name`
+        above: safe to call from the thread that changes the hotkey (the
+        tray's "Change hotkey" worker thread) because `_strip()` only ever
+        reads a whole `str` object on the render thread, and CPython never
+        hands back a half-written one.
+
+        Both keys always travel together, not two separate setters, because
+        they are one invariant: `cancel_key` must be `""` exactly when
+        `hotkey` is Esc -- the same rule `main.py`'s construction sites apply
+        (`"" if CANCEL_KEY in spec.keys else CANCEL_KEY`) -- and a caller that
+        set only one could leave a Cancel control advertised beside an Esc
+        that `_handle_down` will never let it fire against.
+        """
+        self._hotkey = hotkey
+        self._cancel_key = cancel_key
+
     def state_name(self) -> str:
         """The raw state, for the tray's status dot. Safe from any thread."""
         return self._state_name

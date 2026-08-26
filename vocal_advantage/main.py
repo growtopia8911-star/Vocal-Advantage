@@ -663,6 +663,12 @@ class HotkeyChanger:
         self._spec = spec
         # While no hook is installed, so no key event can be in flight.
         self._controller.set_hotkey(spec)
+        # Same rule the construction sites use, so the Stop cap cannot go
+        # stale and the Cancel control cannot outlive the hotkey becoming Esc
+        # (or fail to reappear when it stops being Esc). Gate 2e.
+        self._indicator.set_keys(
+            str(spec), "" if CANCEL_KEY in spec.keys else CANCEL_KEY
+        )
         self._restart(spec)
         say("Hotkey is now %s." % spec)
         self._indicator.flash("hotkey: %s" % spec)

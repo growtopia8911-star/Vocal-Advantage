@@ -1102,6 +1102,9 @@ class _Indicator:
     def status_text(self):
         return "Idle"
 
+    def set_keys(self, hotkey, cancel_key):
+        self.calls.append(("set_keys", hotkey, cancel_key))
+
 
 def _sounding():
     inner, player = _Indicator(), _Player()
@@ -1424,6 +1427,38 @@ def test_a_second_request_while_waiting_is_ignored(tmp_path, capsys):
     changer.request()
 
     assert "Already waiting" in capsys.readouterr().out
+
+
+def test_a_hotkey_change_reaches_the_indicator(tmp_path, monkeypatch):
+    """Gate 2e. Before this fix the Stop cap kept showing the OLD key until
+    the app restarted: `Indicator` had no setter, and the tray's "Change
+    hotkey" path never told it about the swap. `controller.set_hotkey`
+    already had a place the new spec fanned out to; the Indicator needs to be
+    another one."""
+    module = _HotkeyModule(result=parse_hotkey("ctrl+alt+d"))
+    changer, _, indicator, _ = _changer(tmp_path, module)
+
+    _run(changer, module, monkeypatch)
+
+    # CANCEL_KEY itself ("esc", lowercase), not `str(parse_hotkey("esc"))`
+    # ("Esc") -- the exact literal the construction sites already pass as the
+    # Cancel cap's text, so the runtime path must match it, not "improve" it.
+    assert (
+        "set_keys", str(parse_hotkey("ctrl+alt+d")), va_main.CANCEL_KEY
+    ) in indicator.calls
+
+
+def test_a_hotkey_change_to_esc_drops_the_cancel_control(tmp_path, monkeypatch):
+    """CRITICAL: same rule the construction sites use --
+    `"" if CANCEL_KEY in spec.keys else CANCEL_KEY` -- must be applied on the
+    runtime path too, not just at startup. A Cancel control that cannot fire
+    (the hotkey takes precedence in `_handle_down`) would be a lie."""
+    module = _HotkeyModule(result=parse_hotkey("esc"))
+    changer, _, indicator, _ = _changer(tmp_path, module)
+
+    _run(changer, module, monkeypatch)
+
+    assert ("set_keys", str(parse_hotkey("esc")), "") in indicator.calls
 
 
 def test_the_prompt_uses_the_plain_indicator_not_the_sounding_one(tmp_path):
