@@ -132,10 +132,20 @@ PILL_BORDER_WIDTH = 0.0
 # from the researched app. There is no room for them at 30pt tall. The keys
 # themselves are unaffected -- the hotkey still stops and Esc still cancels --
 # so what is lost is the on-screen reminder, not the ability.
-COMPACT_WIDTH = 110.0
-#: Fully round, so height/2 is the radius. 26 rather than the old pill's 30:
-#: Wispr Flow's is smaller than either, and small is the whole request.
-COMPACT_HEIGHT = 26.0
+COMPACT_WIDTH = 76.0
+#: Fully round, so height/2 is the radius.
+#:
+#: 76 x 28 is measured, not guessed. Kevin supplied a YouTube frame of Wispr
+#: Flow in use, and it contained a better ruler than the menu bar: a Google
+#: Docs ruler at 100% zoom, where one inch is exactly 96pt. Its inch marks sit
+#: ~96.5px apart in that frame, so the frame is ~1px per point -- corroborated
+#: by the Chrome window measuring 1728px wide, exactly a 16" MacBook Pro's
+#: default scaled width. Their pill measures ~73 x 28 against that scale.
+#:
+#: The ratio is the part that matters and the part earlier guesses got wrong.
+#: Theirs is ~2.6:1 -- a stubby bubble. This was 4.2:1, which is why matching
+#: the width alone never made it look right.
+COMPACT_HEIGHT = 28.0
 #: From each end. The ends are fully round, so this must clear the cap's curve.
 COMPACT_PAD_X = 10.0
 COMPACT_DOT_DIAMETER = 7.0
@@ -144,8 +154,8 @@ COMPACT_DOT_GAP = 9.0
 #: How many bars the compact trace holds. Sized to fill the space left of
 #: the dot rather than inherited from the resting pill's 15, which centred
 #: a short trace in a wide gap and read as a rendering fault.
-#: 21 bars at a 4pt pitch is 82pt of content in the 90pt trace.
-COMPACT_BARS = 21
+#: 14 bars at a 4pt pitch is 54pt of content in the 56pt trace.
+COMPACT_BARS = 14
 
 
 def compact_dot(width: float, height: float) -> Rect:
