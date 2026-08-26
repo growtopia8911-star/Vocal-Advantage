@@ -224,6 +224,30 @@ def bars_for_open(open_: float) -> int:
     return int(round(lerp(wf.BAR_COUNT, wf.BUFFER_BARS, t)))
 
 
+def strip_alpha(strip_height: float) -> float:
+    """How visible the strip's contents should be, given the strip's real height.
+
+    `open_` alone is not enough: the plan claimed alpha rides `open_` so the
+    strip "never draws squashed", but alpha does not stop geometric overflow
+    -- a part-grown strip can be shorter than the 20pt key cap it holds, and
+    at any alpha that cap still clips against the panel's rounded corner. So
+    the ramp is driven by the strip's own height against what its tallest
+    content actually needs, not by `open_` directly.
+
+    Below `floor` the strip cannot fit a cap at all and is fully transparent;
+    at `STRIP_HEIGHT` (a fully open panel) it is fully opaque. Both
+    renderers -- AppKit and, from Task 6, Win32/Pillow -- call this rather
+    than deriving their own ramp, so they cannot disagree about when the
+    strip is legible.
+    """
+    floor = CAP_HEIGHT + 2.0   # the tallest thing the strip holds, plus breathing room
+    span = STRIP_HEIGHT - floor
+    if span <= 0.0:
+        return 0.0
+    t = (strip_height - floor) / span
+    return 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+
+
 def _label_width(text: str, char_width: float) -> float:
     return len(text) * char_width
 

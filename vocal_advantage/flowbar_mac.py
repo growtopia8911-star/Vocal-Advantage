@@ -268,7 +268,10 @@ class _PillView(NSView):
 
         if data.bar_alpha > 0.01:
             self._draw_bars(data, placed)
-        if data.open > 0.01:
+        # Same test `_draw_strip` uses internally to decide whether to draw
+        # at all, so the guard here and the guard inside it cannot disagree
+        # about whether the strip is visible this frame.
+        if panel.strip_alpha(placed.strip.h) > 0.0:
             self._draw_strip(data, placed)
         if data.text and data.text_alpha > 0.01:
             self._draw_message(data, width, height)
@@ -317,10 +320,17 @@ class _PillView(NSView):
     def _draw_strip(self, data, placed) -> None:
         """The dot, the state word, and each control beside its own key cap.
 
-        Alpha rides `open` throughout, so the strip fades in as the panel
-        widens rather than drawing squashed into a part-grown one.
+        Alpha rides the strip's own real height against what its tallest
+        content needs -- see `panel.strip_alpha` -- not `open` directly.
+        "Alpha rides `open`" was the plan's original claim, and it was wrong:
+        alpha does not stop geometric overflow, and a part-grown strip can be
+        shorter than the 20pt key cap it holds, which clips against the
+        panel's rounded corner at any alpha. Waiting until the strip can
+        actually hold its contents is what `strip_alpha` buys instead.
         """
-        alpha = data.open
+        alpha = panel.strip_alpha(placed.strip.h)
+        if alpha <= 0.0:
+            return
         if placed.dot is not None:
             dot_rgb = panel.DOT_RECORDING_RGB
             if data.state == flowbar.TRANSCRIBING:

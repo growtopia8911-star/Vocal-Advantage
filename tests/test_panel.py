@@ -87,6 +87,51 @@ def test_the_band_is_never_starved_mid_grow():
         assert band.h > 0.0
 
 
+# --- strip_alpha --------------------------------------------------------------
+#
+# Fix round 2: "alpha rides `open_`" was the plan's claim for why a
+# part-grown strip never draws squashed, and it was wrong -- alpha does not
+# stop geometric overflow. A strip shorter than its own 20pt key cap clips
+# that cap against the panel's rounded corner no matter how transparent it
+# is. `strip_alpha` gates visibility on the strip's real height instead.
+
+
+def test_strip_alpha_is_zero_at_zero_height():
+    assert panel.strip_alpha(0.0) == 0.0
+
+
+def test_strip_alpha_is_zero_below_the_floor():
+    """The floor is CAP_HEIGHT (20) plus 2pt of breathing room -- 22. Below
+    that the strip cannot fit its tallest content (a key cap) at all, so
+    nothing should draw, not even at reduced opacity."""
+    floor = panel.CAP_HEIGHT + 2.0
+    for height in (0.0, 1.0, 10.0, floor - 0.01, floor):
+        assert panel.strip_alpha(height) == 0.0
+
+
+def test_strip_alpha_is_one_at_full_strip_height():
+    assert panel.strip_alpha(panel.STRIP_HEIGHT) == 1.0
+
+
+def test_strip_alpha_is_monotonic_non_decreasing():
+    previous = -1.0
+    height = 0.0
+    while height <= panel.STRIP_HEIGHT + 1e-9:
+        current = panel.strip_alpha(height)
+        assert current >= previous - 1e-12
+        previous = current
+        height += 0.5
+
+
+def test_strip_alpha_never_leaves_zero_to_one():
+    for height in (
+        -100.0, -1.0, 0.0, 5.0, panel.CAP_HEIGHT, panel.STRIP_HEIGHT,
+        panel.STRIP_HEIGHT + 1.0, 1000.0,
+    ):
+        alpha = panel.strip_alpha(height)
+        assert 0.0 <= alpha <= 1.0
+
+
 # --- palette ----------------------------------------------------------------
 
 @pytest.mark.parametrize("name,expected", [
