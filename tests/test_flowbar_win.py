@@ -350,10 +350,28 @@ def test_the_pill_is_still_forced_symmetric():
 
 
 def test_the_panel_has_an_outer_border():
-    """Gate 1c. Lighter than either band, on all four edges."""
+    """Gate 1c. Lighter than either band, on all four edges -- actually
+    sampled on all four, not just the top."""
     image = render_frame(a_panel_frame(), 420, 96).convert("RGB")
-    edge = image.getpixel((210, 0))
-    inside = image.getpixel((210, 8))
+    for edge_xy, inside_xy in (
+        ((210, 0), (210, 8)),      # top
+        ((210, 95), (210, 87)),    # bottom
+        ((0, 48), (8, 48)),        # left
+        ((419, 48), (411, 48)),    # right
+    ):
+        edge = image.getpixel(edge_xy)
+        inside = image.getpixel(inside_xy)
+        assert sum(edge) > sum(inside), f"{edge_xy} not lighter than {inside_xy}"
+
+
+def test_the_resting_pill_has_a_border_too():
+    """The border used to draw only inside `if frame.open > 0.001:`, so a
+    resting frame -- `Frame.open`'s default, and what every pre-existing pill
+    test exercises -- had no outline at all, while flowbar_mac strokes the
+    border unconditionally. Found by cross-platform pixel sampling."""
+    image = render_frame(a_frame(), 78, 30).convert("RGB")
+    edge = image.getpixel((39, 0))
+    inside = image.getpixel((39, 8))
     assert sum(edge) > sum(inside)
 
 

@@ -322,11 +322,18 @@ def render_frame(frame, width: int, height: int) -> Image.Image:
                             Image.new("L", image.size, 0), mask)
         )
         draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle(
-            (0, 0, width * scale - 1, height * scale - 1),
-            radius=radius, outline=panel.BORDER_RGB + (alpha,),
-            width=max(1, int(scale)),
-        )
+
+    # Unconditional, matching flowbar_mac's drawRect_: the border strokes the
+    # pill at rest just as it strokes the open panel, so it cannot vanish for
+    # every closed-panel frame -- which is most of them, since `open` defaults
+    # to 0.0 and every resting-pill frame lives at or near it. Uses `alpha`
+    # (pill_alpha), not `band_alpha`: the border's own opacity, not the
+    # gradient bands' faded-in one.
+    draw.rounded_rectangle(
+        (0, 0, width * scale - 1, height * scale - 1),
+        radius=radius, outline=panel.BORDER_RGB + (alpha,),
+        width=max(1, int(scale)),
+    )
 
     bar_alpha = int(round(_clamp01(frame.bar_alpha) * 255))
     if bar_alpha > 2 and placed.band.h > 0:
