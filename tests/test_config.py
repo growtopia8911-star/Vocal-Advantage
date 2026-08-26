@@ -59,6 +59,7 @@ def test_defaults_has_exactly_the_spec_keys():
         "max_duration_s",
         "clean_speech",
         "flow_bar",
+        "flow_bar_always_visible",
         "flow_bar_position",
         "flow_bar_point",
         "skip_cleanup_in",

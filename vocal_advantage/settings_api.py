@@ -57,6 +57,7 @@ TIERS: dict[str, tuple[str, ...]] = {
         "hotkey",
         "tap_threshold_s",
         "flow_bar",
+        "flow_bar_always_visible",
         "flow_bar_position",
         "sounds",
         "sound_on_start",
@@ -91,6 +92,7 @@ NO_CONTROL = frozenset({"flow_bar_point"})
 _BOOLS = frozenset(
     {
         "flow_bar",
+        "flow_bar_always_visible",
         "sounds",
         "sound_on_start",
         "history",

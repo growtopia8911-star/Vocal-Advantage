@@ -280,6 +280,8 @@ class _PillView(NSView):
         clip.setLineWidth_(1.0)
         clip.stroke()
 
+        if data.dot is not None:
+            self._draw_dot(data, width, height)
         if data.bar_alpha > 0.01:
             self._draw_bars(data, placed)
         # Same test `_draw_strip` uses internally to decide whether to draw
@@ -319,10 +321,28 @@ class _PillView(NSView):
         outline.setLineWidth_(MOVE_OUTLINE_WIDTH)
         outline.stroke()
 
+    def _draw_dot(self, data, width: float, height: float) -> None:
+        """The state dot on the compact indicator.
+
+        Rides `pill_alpha` rather than `bar_alpha` so it fades with the pill
+        it sits in: the bars drop to nothing for a message, and a dot left at
+        full ink over a fading pill would be the last thing on screen.
+        """
+        _colour(data.dot, data.pill_alpha).set()
+        NSBezierPath.bezierPathWithOvalInRect_(
+            _rect(panel.compact_dot(width, height))
+        ).fill()
+
     def _draw_bars(self, data, placed) -> None:
         band = placed.band
         if band.h <= 0.0:
             return
+        if data.dot is not None:
+            # The compact indicator: the dot owns the left end, so the trace
+            # gets everything right of it rather than the full width. Taken
+            # from `panel` rather than worked out here, so the Windows
+            # renderer cannot lay the same bars out anywhere else.
+            band = panel.compact_trace(band.w, band.h)
         centre_y = band.y + band.h / 2.0
         # `panel.PEAK_FRACTION` is 69% of band height at peak, mirrored -- so
         # the tallest bar's half is half of that. See panel.py for why this

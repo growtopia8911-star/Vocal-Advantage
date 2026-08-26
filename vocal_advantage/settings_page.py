@@ -42,6 +42,10 @@ CONTROLS: dict[str, dict] = {
     },
     "flow_bar": {"label": "Show the Flow Bar", "kind": "toggle",
                  "help": "The waveform pill. Turn it off for the tray icon alone."},
+    "flow_bar_always_visible": {
+        "label": "Keep it on screen when idle", "kind": "toggle",
+        "help": "Off: it appears only while you dictate.",
+    },
     "flow_bar_position": {
         "label": "Position", "kind": "choice",
         "choices": ["bottom-centre", "bottom-left", "bottom-right"],

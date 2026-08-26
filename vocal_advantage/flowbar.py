@@ -63,6 +63,20 @@ MESSAGE_PADDING = 22.0
 #: "could not paste" should not need one.
 PANEL_STATES = frozenset({RECORDING, TRANSCRIBING})
 
+#: The states that show the compact recording indicator -- a small pill with a
+#: state dot and a live trace. Same set as PANEL_STATES, kept under its own
+#: name because it now means "the bar is doing something", not "the bar has
+#: grown into a panel". The panel is gone; see `panel.COMPACT_WIDTH`.
+ACTIVE_STATES = PANEL_STATES
+
+#: What colour the dot is in each active state. The only thing that survived
+#: the strip, because colour is the fastest channel there is and it is what
+#: separates recording from transcribing once the labels are gone.
+DOT_RGB = {
+    RECORDING: panel.DOT_RECORDING_RGB,
+    TRANSCRIBING: panel.DOT_TRANSCRIBING_RGB,
+}
+
 #: The states that keep the bar on screen even though nothing else says so.
 #: IDLE is the only state left out -- and even IDLE is visible while "Move
 #: bar" is on, which `next_frame` handles separately since it is a toggle, not
@@ -168,6 +182,10 @@ class Frame:
     #: once in `next_frame`, so a renderer never has to re-derive "nothing to
     #: see" from alpha itself.
     visible: bool = True
+    #: The state dot's colour as a 0-255 triple, or None for no dot. Set only
+    #: in the active states -- a message and a resting pill have nothing to
+    #: report, and a dot that never changes is decoration.
+    dot: tuple[int, int, int] | None = None
 
 
 class Indicator:
@@ -183,7 +201,15 @@ class Indicator:
         n_bars: int = wf.BUFFER_BARS,
         hotkey: str = "",
         cancel_key: str = "",
+        always_visible: bool = False,
     ) -> None:
+        #: `flow_bar_always_visible` from config.json. Off by default: the bar
+        #: appears while dictating and is gone the rest of the time. On, it
+        #: rests on screen the way it used to.
+        self._always_visible = bool(always_visible)
+        #: Set by "Hide for 1 hour". Overrides everything except "Move bar",
+        #: which needs the bar on screen to be draggable at all.
+        self._suppressed = False
         #: A zero-argument callable returning the current mic RMS, or None.
         #: `Recorder.level` is what production passes. Kept as a callable so
         #: this module never imports the recorder, and so the tests can drive
@@ -218,6 +244,8 @@ class Indicator:
         self._bar_alpha = BAR_ALPHA[IDLE]
         self._text_alpha = TEXT_ALPHA[IDLE]
         self._open = 0.0
+        #: Whether the previous frame was an active shape. See `next_frame`.
+        self._was_active = False
         #: Whether "Move bar" is on. Set by the platform layer, the only
         #: thing that knows -- same shape as `_hotkey`/`_cancel_key` below.
         self._movable = False
@@ -282,6 +310,24 @@ class Indicator:
         """
         self._movable = bool(movable)
 
+    def set_always_visible(self, always_visible: bool) -> None:
+        """Told by the settings window when the toggle changes."""
+        self._always_visible = bool(always_visible)
+
+    def set_suppressed(self, suppressed: bool) -> None:
+        """"Hide for 1 hour" on or off. Plain assignment, any thread.
+
+        Deliberately not persisted and deliberately not a timestamp here: the
+        clock lives in `main.py`, which owns the timer that turns this back
+        off. This object only knows on or off, so it stays testable without
+        one.
+        """
+        self._suppressed = bool(suppressed)
+
+    def suppressed(self) -> bool:
+        """Whether "Hide for 1 hour" is currently on. For the menu's title."""
+        return self._suppressed
+
     def state_name(self) -> str:
         """The raw state, for the tray's status dot. Safe from any thread."""
         return self._state_name
@@ -317,12 +363,22 @@ class Indicator:
         # state change now hops the shape in one frame; only the alphas (and,
         # for a shape that is staying a pill, the width) keep easing, so what
         # is left to see is a fade, not a resize.
-        was_panel = self._open >= 1.0
-        self._open = 1.0 if self._mode in PANEL_STATES else 0.0
+        # Always 0 now: the two-band panel is gone and every shape this draws
+        # is a pill. Kept rather than removed because `bars_for_open` and the
+        # renderers still read it, and because a future shape could use it
+        # again without re-deriving what it meant.
+        # Whether the PREVIOUS frame was an active shape, tracked rather than
+        # inferred from the width. Inferring it ("wider than the compact
+        # pill") looks equivalent and is not: a flash message widens the pill
+        # past the compact width too, so leaving one would snap instead of
+        # easing back and the message's exit would jump.
+        was_active = self._was_active
+        self._was_active = self._mode in ACTIVE_STATES
+        self._open = 0.0
 
-        if self._mode in PANEL_STATES:
+        if self._mode in ACTIVE_STATES:
             # Full size the instant it appears -- never eased into.
-            self._width = panel.PANEL_WIDTH
+            self._width = panel.COMPACT_WIDTH
         else:
             target_width = (
                 message_width(self._text)
@@ -336,13 +392,19 @@ class Indicator:
             # snapped to the pill's 30: a squashed, panel-wide pill for a few
             # frames, which is a shrink in every way but name.
             self._width = (
-                target_width if was_panel
+                target_width if was_active
                 else _ease(self._width, target_width, FADE_ALPHA)
             )
 
         pill_alpha_target = PILL_ALPHA[self._mode]
-        if self._mode == IDLE and self._movable:
+        if self._mode == IDLE and (self._movable or self._always_visible):
+            # Both reasons to rest on screen use the old resting alpha rather
+            # than full ink: dim is what "sitting over your work all day"
+            # should look like, and it is what this bar looked like before
+            # idle went dark.
             pill_alpha_target = MOVABLE_IDLE_PILL_ALPHA
+        if self._suppressed and not self._movable:
+            pill_alpha_target = 0.0
         self._pill_alpha = _ease(self._pill_alpha, pill_alpha_target, FADE_ALPHA)
         self._bar_alpha = _ease(
             self._bar_alpha, BAR_ALPHA[self._mode], FADE_ALPHA
@@ -354,7 +416,12 @@ class Indicator:
         # Sliced, not regenerated: the buffer always holds BUFFER_BARS of real
         # history and the pill shows a window onto its newest. Index 0 is the
         # newest, so this keeps the recent end and drops the old.
-        self._heights = heights[: panel.bars_for_open(self._open)]
+        # The compact indicator holds more bars than the resting pill: it is
+        # wider, and a short trace centred in a wide pill looks broken.
+        self._heights = heights[:
+            panel.COMPACT_BARS if self._mode in ACTIVE_STATES
+            else panel.bars_for_open(self._open)
+        ]
 
         self._frames += 1
         return Frame(
@@ -374,22 +441,52 @@ class Indicator:
             ),
             strip=self._strip(),
             hover=hover,
-            visible=(
-                self._mode in VISIBLE_STATES
-                or self._movable
-                or self._pill_alpha > HIDE_ALPHA_EPS
-            ),
+            dot=DOT_RGB.get(self._mode),
+            visible=self._visible(),
+        )
+
+    def _visible(self) -> bool:
+        """Whether the bar should be on screen at all right now.
+
+        Order matters, and each clause is a decision:
+
+        * "Move bar" wins outright, even over "Hide for 1 hour" -- you cannot
+          drag something that is not drawn, so the one mode whose entire job
+          is dragging has to override the one whose job is hiding.
+        * "Hide for 1 hour" then beats everything else, including an active
+          dictation. Hiding that still showed a bar while you dictated would
+          not be hiding.
+        * Otherwise: on while something is happening, on if the user asked for
+          it always, and on for the last few frames of a fade-out so the
+          window is never yanked off screen mid-fade.
+        """
+        if self._movable:
+            return True
+        if self._suppressed:
+            return False
+        return (
+            self._mode in VISIBLE_STATES
+            or self._always_visible
+            or self._pill_alpha > HIDE_ALPHA_EPS
         )
 
     def _strip(self) -> tuple[panel.StripItem, ...]:
         """The strip's right-hand controls, for this state.
 
-        Cancel is dropped when `cancel_key` is empty, which is how the caller
-        says Esc is itself the hotkey. `_handle_down` gives the hotkey
-        precedence there, so a Cancel control would be advertising something
-        that cannot happen -- the rule `legend_for` already enforced, moved
-        onto the strip rather than lost with the legend.
+        Always empty as of 2026-08-25. The compact indicator is 30pt tall and
+        has no strip to put controls in, so `Stop`/`Cancel` and their key caps
+        are gone from the screen. The keys still work -- the hotkey stops and
+        Esc cancels, neither of which ever depended on the bar.
+
+        Kept as a method returning `()` rather than deleted: `Frame.strip`,
+        `panel.layout` and both renderers still understand strip items, and a
+        taller shape could fill this in again without rebuilding any of that.
+        `_hotkey`/`_cancel_key` stay maintained for the same reason.
         """
+        return ()
+
+    def _unused_strip(self) -> tuple[panel.StripItem, ...]:
+        """What `_strip` returned while the two-band panel existed."""
         if self._mode not in CONTROL_STATES:
             return ()
         items = [panel.StripItem("stop", "Stop", self._hotkey)]

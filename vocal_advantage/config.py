@@ -96,6 +96,10 @@ DEFAULTS: dict = {
     # The always-on-screen waveform pill. Set false to keep the tray icon and
     # the hotkey with no overlay at all; dictation is unaffected either way.
     "flow_bar": True,
+    # Keep the bar on screen even when nothing is happening. Off by default:
+    # the bar appears while you dictate and is gone the rest of the time. On,
+    # it rests dimmed in its usual place, the way it did before 2026-08-25.
+    "flow_bar_always_visible": False,
     # Where it sits. See FLOW_BAR_POSITIONS.
     "flow_bar_position": "bottom-centre",
     # Where it was last dragged to, as [centre_x, bottom_y] in screen
@@ -196,6 +200,9 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
         cfg["hotkey"] = DEFAULTS["hotkey"]
 
     cfg["flow_bar"] = _checked_bool("flow_bar", cfg["flow_bar"], path)
+    cfg["flow_bar_always_visible"] = _checked_bool(
+        "flow_bar_always_visible", cfg["flow_bar_always_visible"], path
+    )
     cfg["flow_bar_position"] = _checked_position(cfg["flow_bar_position"], path)
     cfg["flow_bar_point"] = _checked_point(cfg["flow_bar_point"], path)
     cfg["skip_cleanup_in"] = _checked_skip_list(cfg["skip_cleanup_in"], path)

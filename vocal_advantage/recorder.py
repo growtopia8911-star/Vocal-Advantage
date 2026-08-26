@@ -125,6 +125,10 @@ class Recorder:
         # and read are atomic under the GIL, so the read needs no lock and a
         # renderer that stalls can never stall the audio callback.
         self._level = 0.0
+        #: Which input device to open, as a sounddevice index, or None for
+        #: the system default. Changed by the tray's Microphone item, which
+        #: refuses while a dictation is in flight -- see set_device.
+        self.device = None
 
     # -- state ---------------------------------------------------------------
 
@@ -154,6 +158,32 @@ class Recorder:
         return self._level
 
     # -- stream lifecycle ----------------------------------------------------
+
+    def set_device(self, device) -> None:
+        """Switch input device, reopening the stream if one is running.
+
+        Refuses mid-dictation rather than switching underneath it: `stop()`
+        returns the audio captured so far, and swapping the device in the
+        middle would hand back a recording spliced from two microphones.
+
+        The stream is closed before the new device is opened, not after. Two
+        streams briefly sharing one machine is the case PortAudio is least
+        reliable about, and this is exactly the "device negotiation" the
+        open-once-hold-forever design exists to avoid paying per dictation --
+        so it is paid here, once, when a person asks for it.
+        """
+        if self._capturing:
+            raise RecorderError(
+                "Cannot switch microphone while a dictation is in progress."
+            )
+        if device == self.device:
+            return
+        was_open = self._stream is not None
+        if was_open:
+            self.close()
+        self.device = device
+        if was_open:
+            self.open()  # raises RecorderError if the new device is unusable
 
     def open(self) -> None:
         """Open the microphone and leave it open. Called once, at startup.
@@ -337,6 +367,7 @@ class Recorder:
 
     def _start_stream(self, extra_settings):
         stream = sd.InputStream(
+            device=self.device,
             samplerate=self.samplerate,
             channels=CHANNELS,
             dtype=DTYPE,

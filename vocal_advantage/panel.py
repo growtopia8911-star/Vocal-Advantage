@@ -110,6 +110,54 @@ DOT_RECORDING_RGB = (255, 69, 58)
 DOT_TRANSCRIBING_RGB = (50, 121, 192)
 
 
+# --- the compact recording indicator ----------------------------------------
+# Replaces the 420x96 two-band panel, 2026-08-25, at the user's request after
+# seeing it: "I actually don't want my UI to show me it enhancing in size...
+# it's just unnecessary", then "make the pill smaller and more compact".
+#
+# What this shape gives up, deliberately: the control strip, and with it the
+# `Stop [key] | Cancel [Esc]` labels that were the single transferable pattern
+# from the researched app. There is no room for them at 30pt tall. The keys
+# themselves are unaffected -- the hotkey still stops and Esc still cancels --
+# so what is lost is the on-screen reminder, not the ability.
+COMPACT_WIDTH = 180.0
+#: From each end. The ends are fully round, so this must clear the cap's curve.
+COMPACT_PAD_X = 12.0
+COMPACT_DOT_DIAMETER = 7.0
+#: Between the dot and the first bar, so the trace does not crowd the state.
+COMPACT_DOT_GAP = 9.0
+#: How many bars the compact trace holds. Sized to fill the space left of
+#: the dot rather than inherited from the resting pill's 15, which centred
+#: a short trace in a wide gap and read as a rendering fault.
+#: 35 bars at a 4pt pitch is 138pt of content in the 140pt trace.
+COMPACT_BARS = 35
+
+
+def compact_dot(width: float, height: float) -> Rect:
+    """The state dot, left-aligned and vertically centred.
+
+    The one thing that survives from the strip: colour is the fastest channel
+    there is, and it is what tells recording from transcribing at this size.
+    """
+    return Rect(
+        COMPACT_PAD_X,
+        (height - COMPACT_DOT_DIAMETER) / 2.0,
+        COMPACT_DOT_DIAMETER,
+        COMPACT_DOT_DIAMETER,
+    )
+
+
+def compact_trace(width: float, height: float) -> Rect:
+    """Where the waveform goes: everything right of the dot.
+
+    Returned as a rect rather than a width so the renderers can lay the bars
+    out inside it without either of them working out the left edge itself --
+    the same reason every other rect in this module exists.
+    """
+    left = COMPACT_PAD_X + COMPACT_DOT_DIAMETER + COMPACT_DOT_GAP
+    return Rect(left, 0.0, max(0.0, width - left - COMPACT_PAD_X), height)
+
+
 def lerp(a: float, b: float, t: float) -> float:
     """Linear blend. `t` is not clamped: callers clamp before calling."""
     return a + (b - a) * t

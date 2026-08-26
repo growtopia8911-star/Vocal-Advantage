@@ -369,11 +369,16 @@ def test_recording_is_visible():
     assert indicator.next_frame().visible is True
 
 
-def test_the_panel_is_full_size_on_the_first_frame():
+def test_the_indicator_is_full_size_on_the_first_frame():
+    # The two-band panel was replaced by the compact pill on 2026-08-25; what
+    # this still guards is that whatever the active shape is, it arrives at
+    # full size rather than being eased into.
     indicator = Indicator()
     indicator.show_recording()
     frame = indicator.next_frame()
-    assert (frame.width, frame.height) == (panel.PANEL_WIDTH, panel.PANEL_HEIGHT)
+    assert (frame.width, frame.height) == (
+        panel.COMPACT_WIDTH, float(wf.PILL_HEIGHT),
+    )
 
 
 def test_no_frame_is_ever_an_intermediate_size_while_recording():
@@ -384,7 +389,7 @@ def test_no_frame_is_ever_an_intermediate_size_while_recording():
     for _ in range(120):
         frame = indicator.next_frame()
         assert (frame.width, frame.height) == (
-            panel.PANEL_WIDTH, panel.PANEL_HEIGHT,
+            panel.COMPACT_WIDTH, float(wf.PILL_HEIGHT),
         )
 
 
@@ -393,7 +398,9 @@ def test_transcribing_stays_visible_and_full_size():
     indicator.show_processing()
     frame = indicator.next_frame()
     assert frame.visible is True
-    assert (frame.width, frame.height) == (panel.PANEL_WIDTH, panel.PANEL_HEIGHT)
+    assert (frame.width, frame.height) == (
+        panel.COMPACT_WIDTH, float(wf.PILL_HEIGHT),
+    )
 
 
 def test_a_flash_message_is_visible_and_pill_shaped_and_opens_no_panel():
@@ -405,7 +412,7 @@ def test_a_flash_message_is_visible_and_pill_shaped_and_opens_no_panel():
     assert frame.height == float(wf.PILL_HEIGHT)
 
 
-def test_leaving_the_panel_snaps_geometry_but_still_fades_before_hiding():
+def test_leaving_the_active_shape_snaps_but_still_fades_before_hiding():
     # `open` -- and the size it drives -- snaps immediately: there is no
     # intermediate width or height on the way out either. But the frame stays
     # `visible` for a few more frames while `pill_alpha` eases down, and only

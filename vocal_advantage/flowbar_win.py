@@ -348,18 +348,33 @@ def render_frame(frame, width: int, height: int) -> Image.Image:
         width=max(1, int(scale)),
     )
 
+    if frame.dot is not None:
+        # The state dot on the compact indicator. Rides `alpha` (pill_alpha),
+        # not the bar alpha, so it fades with the pill it sits in rather than
+        # outliving it -- identical to flowbar_mac's `_draw_dot`.
+        d = panel.compact_dot(float(width), float(height))
+        draw.ellipse(
+            (d.x * scale, d.y * scale, d.right * scale, d.bottom * scale),
+            fill=frame.dot + (alpha,),
+        )
+
     bar_alpha = int(round(_clamp01(frame.bar_alpha) * 255))
     if bar_alpha > 2 and placed.band.h > 0:
-        centre_y = (placed.band.y + placed.band.h / 2.0) * scale
+        band = placed.band
+        if frame.dot is not None:
+            # The dot owns the left end; the trace gets what is left. From
+            # `panel`, so both renderers put the bars in the same place.
+            band = panel.compact_trace(band.w, band.h)
+        centre_y = (band.y + band.h / 2.0) * scale
         # `panel.PEAK_FRACTION` is 69% of band height at peak, mirrored -- so
         # the tallest bar's half is half of that. See panel.py for why this
         # is not a bare float here. Taken from `placed.band`, not the raw
         # pill height, so the resting pill (whose band *is* the whole pill --
         # see `panel.bands`) and the open panel use the identical rule.
-        max_half = placed.band.h * panel.PEAK_FRACTION / 2.0 * scale
+        max_half = band.h * panel.PEAK_FRACTION / 2.0 * scale
         bar_width = wf.BAR_WIDTH * scale
         for x, normalised in zip(
-            wf.bar_layout(placed.band.w * scale, len(frame.heights),
+            wf.bar_layout(band.w * scale, len(frame.heights),
                           bar_width, wf.BAR_GAP * scale),
             frame.heights,
         ):
@@ -368,9 +383,9 @@ def render_frame(frame, width: int, height: int) -> Image.Image:
             # rather than squashing into ellipses at rest.
             total = max(bar_width, half * 2.0)
             draw.rounded_rectangle(
-                (placed.band.x * scale + x - bar_width / 2.0,
+                (band.x * scale + x - bar_width / 2.0,
                  centre_y - total / 2.0,
-                 placed.band.x * scale + x + bar_width / 2.0,
+                 band.x * scale + x + bar_width / 2.0,
                  centre_y + total / 2.0),
                 radius=bar_width / 2.0,
                 fill=panel.BAR_RGB + (bar_alpha,),

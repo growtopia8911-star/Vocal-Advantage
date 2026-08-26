@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
+import os
+import subprocess
 import platform
 import queue
 import sys
@@ -855,7 +858,154 @@ def _settings_opener(config_path: Path):
     return open_it
 
 
-def _menu_items(bar, changer, config_path: Path):
+def _open_path(target: Path) -> None:
+    """Hand a file to whatever the OS opens it with. Never raises."""
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", str(target)])
+        elif sys.platform == "win32":
+            os.startfile(str(target))  # noqa: S606 - the OS picks the handler
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+    except Exception as exc:  # noqa: BLE001 - a menu click must not crash us
+        warn("Could not open %s: %s" % (target, exc))
+
+
+def _history_opener(history_path: Path):
+    """"History": open logs/history.jsonl in whatever reads .jsonl.
+
+    Deliberately not a window. The data has been accumulating since v0.1 and
+    the recovery use case -- "the paste went into the wrong window, what did I
+    say?" -- is served by opening the file today, where a searchable History
+    window is its own project. Named honestly in the menu for that reason.
+    """
+    def open_it() -> None:
+        if not history_path.exists():
+            warn("No history yet: %s does not exist." % history_path)
+            return
+        _open_path(history_path)
+    return open_it
+
+
+def _paste_last(history_path: Path, paster) -> Callable[[], None]:
+    """"Paste last transcript": re-paste the newest dictation.
+
+    Reads the last well-formed line rather than the last line: history.jsonl
+    is append-only and a half-written final line is exactly what a crash mid
+    write leaves behind. `history.py` already skips corrupt lines on read and
+    this follows it.
+    """
+    def paste_it() -> None:
+        try:
+            lines = history_path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            warn("Could not read history: %s" % exc)
+            return
+        for line in reversed(lines):
+            try:
+                text = json.loads(line).get("text", "")
+            except (ValueError, AttributeError):
+                continue
+            if text:
+                paster(text)
+                return
+        warn("No transcript in history to paste.")
+    return paste_it
+
+
+def _hide_for_an_hour(indicator, seconds: float = 3600.0):
+    """"Hide for 1 hour": returns (toggle, title).
+
+    Not persisted. A restart clears it, which is the behaviour you want from
+    something you reached for because the bar was in the way *right now* --
+    and it means there is no stale timestamp in config.json to explain to
+    someone whose bar is mysteriously missing a week later.
+
+    The timer is a daemon so a pending un-hide can never hold the app open at
+    shutdown, exactly as the clipboard restore already does.
+    """
+    state: dict = {"timer": None}
+
+    def title() -> str:
+        return "Show the bar" if indicator.suppressed() else "Hide for 1 hour"
+
+    def toggle() -> None:
+        timer = state.get("timer")
+        if timer is not None:
+            timer.cancel()
+            state["timer"] = None
+        if indicator.suppressed():
+            indicator.set_suppressed(False)
+            return
+        indicator.set_suppressed(True)
+        state["timer"] = timer = threading.Timer(
+            seconds, lambda: indicator.set_suppressed(False)
+        )
+        timer.daemon = True
+        timer.start()
+
+    return toggle, title
+
+
+def _microphone_item(recorder, config_path: Path):
+    """"Microphone": cycles to the next input device, naming the current one.
+
+    A cycling item rather than a submenu, deliberately: the tray's item list
+    is `(title, action)` pairs on both platforms and neither backend does
+    submenus today. The title carries the whole state -- which device is in
+    use -- so nothing is hidden by the simpler control.
+
+    Returns (title, action), or (title, None) when there is nothing to choose
+    between; an action of None drops the item entirely, which is how "Move
+    bar" already disappears when there is no bar.
+    """
+    try:
+        import sounddevice as sd
+        devices = [
+            (i, d["name"]) for i, d in enumerate(sd.query_devices())
+            if d["max_input_channels"] > 0
+        ]
+    except Exception:  # noqa: BLE001 - no sounddevice, no picker
+        return ("Microphone", None)
+
+    if len(devices) < 2:
+        name = devices[0][1] if devices else "none"
+        return (lambda: "Microphone: %s" % name, None)
+
+    def title() -> str:
+        current = getattr(recorder, "device", None)
+        for index, name in devices:
+            if index == current:
+                return "Microphone: %s" % name
+        return "Microphone: default"
+
+    def cycle() -> None:
+        if getattr(recorder, "is_recording", False):
+            warn("Finish the dictation before switching microphone.")
+            return
+        current = getattr(recorder, "device", None)
+        order = [i for i, _ in devices]
+        try:
+            nxt = order[(order.index(current) + 1) % len(order)]
+        except ValueError:
+            nxt = order[0]
+        previous = current
+        try:
+            recorder.set_device(nxt)
+        except Exception as exc:  # noqa: BLE001 - fall back, never crash
+            warn("Could not switch microphone: %s" % exc)
+            try:
+                recorder.set_device(previous)
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        save_config({"input_device": nxt}, config_path)
+
+    return (title, cycle)
+
+
+def _menu_items(bar, changer, config_path: Path,
+                recorder=None, paster=None, indicator=None):
     """The (title, action) pairs between the status line and Quit.
 
     A title may be a callable, re-read whenever the menu opens, so an item can
@@ -864,7 +1014,7 @@ def _menu_items(bar, changer, config_path: Path):
     disappears when there is no bar to move.
     """
     toggle_move, is_movable = _move_mode(bar, config_path)
-    return [
+    items = [
         ("Settings...", _settings_opener(config_path)),
         (
             (lambda: "Lock bar in place" if is_movable() else "Move bar")
@@ -874,6 +1024,15 @@ def _menu_items(bar, changer, config_path: Path):
         ),
         ("Change hotkey...", changer.request),
     ]
+    if recorder is not None:
+        items.append(_microphone_item(recorder, config_path))
+    items.append(("History", _history_opener(HISTORY_PATH)))
+    if paster is not None:
+        items.append(("Paste last transcript", _paste_last(HISTORY_PATH, paster)))
+    if indicator is not None:
+        hide_toggle, hide_title = _hide_for_an_hour(indicator)
+        items.append((hide_title, hide_toggle))
+    return items
 
 
 def _make_tray(indicator, on_quit: Callable[[], None], items=()):
@@ -1010,6 +1169,7 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
         level_source=lambda: recorder.level,
         hotkey=str(spec),
         cancel_key="" if CANCEL_KEY in spec.keys else CANCEL_KEY,
+        always_visible=cfg.get("flow_bar_always_visible", False),
     )
 
     dictionary = _load_dictionary()
@@ -1071,7 +1231,8 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
         listener=listener, spec=spec, on_key=on_key, controller=controller,
         indicator=indicator, config_path=config_path,
     )
-    tray = _make_tray(indicator, lambda: None, _menu_items(bar, changer, config_path))
+    tray = _make_tray(indicator, lambda: None, _menu_items(bar, changer, config_path,
+                                     recorder, paster, indicator))
 
     shutting_down = threading.Event()
 
@@ -1168,6 +1329,7 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         level_source=lambda: recorder.level,
         hotkey=str(spec),
         cancel_key="" if CANCEL_KEY in spec.keys else CANCEL_KEY,
+        always_visible=cfg.get("flow_bar_always_visible", False),
     )
 
     dictionary = _load_dictionary()
@@ -1253,7 +1415,8 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     )
     tray = (
         _make_tray(
-            indicator, lambda: None, _menu_items(bar, changer, config_path)
+            indicator, lambda: None,
+            _menu_items(bar, changer, config_path, recorder, paster, indicator)
         )
         if app is not None
         else None
