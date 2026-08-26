@@ -808,6 +808,130 @@ def test_a_flow_bar_that_will_not_start_is_survivable(monkeypatch, capsys):
     assert "unaffected" in capsys.readouterr().err
 
 
+# --------------------------------------------------------------------------
+# _make_activate -- the Flow Bar's on_click dispatch (Task 8)
+# --------------------------------------------------------------------------
+#
+# The brief's one named risk: `{"stop": controller.request_stop, ...}.get(id)`
+# type-checks and looks right, but a version that forgot to *call* the result
+# -- handing the callback a bare `dict.get` -- would return the method instead
+# of invoking it, and every click would silently do nothing. Nothing in
+# tests/test_controller_cancel.py could catch that: it drives
+# Controller.request_stop/request_cancel directly and never goes near
+# `activate`. These tests call the actual dispatcher `_make_activate` builds.
+
+
+class _ClickController:
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def request_stop(self) -> None:
+        self.calls.append("stop")
+
+    def request_cancel(self) -> None:
+        self.calls.append("cancel")
+
+
+def test_activate_stop_calls_request_stop():
+    controller = _ClickController()
+    events: "queue.Queue" = queue.Queue()
+    activate = va_main._make_activate(controller, events)
+
+    activate("stop")
+
+    assert controller.calls == ["stop"]
+
+
+def test_activate_cancel_calls_request_cancel():
+    controller = _ClickController()
+    events: "queue.Queue" = queue.Queue()
+    activate = va_main._make_activate(controller, events)
+
+    activate("cancel")
+
+    assert controller.calls == ["cancel"]
+
+
+def test_activate_on_an_unknown_id_is_a_harmless_no_op():
+    controller = _ClickController()
+    events: "queue.Queue" = queue.Queue()
+    activate = va_main._make_activate(controller, events)
+
+    activate("something_else")
+
+    assert controller.calls == []
+    assert events.empty(), "an id that dispatches nothing must wake nothing"
+
+
+def test_a_second_click_is_a_second_call_not_a_stale_closure():
+    """Two different ids through the same `activate` must each reach their
+    own method -- guards against a version that captures `action` once and
+    reuses it, which would make the second click repeat the first."""
+    controller = _ClickController()
+    events: "queue.Queue" = queue.Queue()
+    activate = va_main._make_activate(controller, events)
+
+    activate("stop")
+    activate("cancel")
+
+    assert controller.calls == ["stop", "cancel"]
+
+
+# --------------------------------------------------------------------------
+# A click must wake `controller_loop`, not just set a flag (final review
+# issue 2)
+# --------------------------------------------------------------------------
+#
+# `request_stop`/`request_cancel` only set `Controller._requested`; nothing
+# about that unblocks a loop parked in `events.get(timeout=...)`. The hotkey
+# path has no such gap -- a keypress is *enqueued*, which is exactly what
+# wakes `get()`. Left alone, a clicked Stop can sit unacted-on for up to
+# `TICK_INTERVAL_S` (1.0s in production), long enough that a mis-aimed second
+# click can land on Cancel and throw the dictation away --
+# `test_only_the_latest_request_is_kept` documents that exact loss.
+
+
+def test_activate_enqueues_a_wake_sentinel_not_merely_a_flag():
+    """The click path must put *something* on `events`, the way a keypress
+    already does -- not rely on `request_stop` alone, which only sets a flag
+    `controller_loop` has no reason to notice before its next scheduled tick.
+    """
+    controller = _ClickController()
+    events: "queue.Queue" = queue.Queue()
+    activate = va_main._make_activate(controller, events)
+
+    activate("stop")
+
+    assert controller.calls == ["stop"]
+    item = events.get_nowait()
+    assert item is va_main.WAKE_SENTINEL
+
+
+def test_a_click_wakes_the_loop_before_it_would_otherwise_tick():
+    """Behavioural proof, not just a queue-contents check: run the real
+    `controller_loop` with a long tick interval, click, and confirm `tick()`
+    actually ran. If the click only set a flag, the only item ever queued
+    before shutdown is the `None` sentinel, the loop breaks on it without
+    ever calling `tick()`, and this would see zero ticks."""
+    controller = FakeController()
+    # `_make_activate`'s dispatch dict reads both attributes unconditionally,
+    # so FakeController (which has no state machine) needs harmless stand-ins.
+    controller.request_stop = lambda: None
+    controller.request_cancel = lambda: None
+    events: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    thread = _start_loop(controller, events, stop, tick_interval_s=10.0)
+
+    activate = va_main._make_activate(controller, events)
+    activate("stop")
+    events.put(None)  # shutdown, queued right behind the click
+
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    _, ticks = controller.snapshot()
+    assert ticks >= 1, "the click must wake the loop, not wait for the next tick"
+
+
 def test_a_tray_icon_that_will_not_start_is_survivable(monkeypatch, capsys):
     import vocal_advantage.tray_mac as tray_mac
     import vocal_advantage.tray_win as tray_win
@@ -1101,6 +1225,9 @@ class _Indicator:
 
     def status_text(self):
         return "Idle"
+
+    def set_keys(self, hotkey, cancel_key):
+        self.calls.append(("set_keys", hotkey, cancel_key))
 
 
 def _sounding():
@@ -1426,6 +1553,38 @@ def test_a_second_request_while_waiting_is_ignored(tmp_path, capsys):
     assert "Already waiting" in capsys.readouterr().out
 
 
+def test_a_hotkey_change_reaches_the_indicator(tmp_path, monkeypatch):
+    """Gate 2e. Before this fix the Stop cap kept showing the OLD key until
+    the app restarted: `Indicator` had no setter, and the tray's "Change
+    hotkey" path never told it about the swap. `controller.set_hotkey`
+    already had a place the new spec fanned out to; the Indicator needs to be
+    another one."""
+    module = _HotkeyModule(result=parse_hotkey("ctrl+alt+d"))
+    changer, _, indicator, _ = _changer(tmp_path, module)
+
+    _run(changer, module, monkeypatch)
+
+    # CANCEL_KEY itself ("esc", lowercase), not `str(parse_hotkey("esc"))`
+    # ("Esc") -- the exact literal the construction sites already pass as the
+    # Cancel cap's text, so the runtime path must match it, not "improve" it.
+    assert (
+        "set_keys", str(parse_hotkey("ctrl+alt+d")), va_main.CANCEL_KEY
+    ) in indicator.calls
+
+
+def test_a_hotkey_change_to_esc_drops_the_cancel_control(tmp_path, monkeypatch):
+    """CRITICAL: same rule the construction sites use --
+    `"" if CANCEL_KEY in spec.keys else CANCEL_KEY` -- must be applied on the
+    runtime path too, not just at startup. A Cancel control that cannot fire
+    (the hotkey takes precedence in `_handle_down`) would be a lie."""
+    module = _HotkeyModule(result=parse_hotkey("esc"))
+    changer, _, indicator, _ = _changer(tmp_path, module)
+
+    _run(changer, module, monkeypatch)
+
+    assert ("set_keys", str(parse_hotkey("esc")), "") in indicator.calls
+
+
 def test_the_prompt_uses_the_plain_indicator_not_the_sounding_one(tmp_path):
     # The prompt repeats about once a second while you decide. The sound
     # wrapper maps every flash to the error tone, so repeating it through that
@@ -1545,3 +1704,72 @@ def test_each_launcher_wires_a_usable_paster(platform_name, tmp_path, monkeypatc
     assert built, "no paster was constructed"
     for inner in built:
         assert callable(getattr(inner, "paste_text", None)), inner
+
+
+# --------------------------------------------------------------------------
+# The launchers hand the bar the configured hotkey
+# --------------------------------------------------------------------------
+#
+# Replaces test_flowbar_legend.py::test_each_launcher_hands_the_bar_a_legend,
+# which spied on this same Indicator() call for the `legend=` kwarg that
+# argument replaced. flowbar.Frame no longer carries a legend string, but the
+# launcher still has to hand *something* correct to Indicator's `hotkey=`, and
+# nothing else checks that main.py actually does -- the two tests that merely
+# stop the launcher past this line (above, and
+# test_run_app_on_mac_never_touches_tkinter) assert nothing about what was
+# passed.
+#
+# Both platforms now pass the hotkey (Task 8): the Windows launcher used to
+# omit it because `flowbar_win.render_frame` drew no text, and that stopped
+# being true once the panel work gave it a font.
+
+
+@pytest.mark.parametrize("platform_name", ["darwin", "win32"])
+def test_each_launcher_hands_the_bar_the_configured_hotkey(
+    platform_name, tmp_path, monkeypatch
+):
+    """Neither launcher is covered end to end -- every test that drives one
+    stops at the model load -- so the wiring has to be checked where it
+    happens.
+
+    Same shape as ``test_each_launcher_wires_a_usable_paster`` above: spy on
+    the constructor call itself, because a hotkey that silently never reaches
+    the Indicator looks exactly like a bar that has nothing to say.
+    """
+    # Imported before sys.platform is faked, and deliberately. `flowbar_win`
+    # builds `ctypes.WinDLL("user32")` at module scope behind a platform guard,
+    # so importing it *while* pretending to be Windows runs that on a Mac and
+    # dies. Getting it into sys.modules first makes the guard a no-op.
+    from vocal_advantage import flowbar as fb
+    from vocal_advantage import flowbar_win, hotkey_win, paste_win  # noqa: F401
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"hotkey": "ctrl+alt+d"}, indent=2) + "\n", encoding="utf-8"
+    )
+
+    monkeypatch.setattr(va_main.sys, "platform", platform_name)
+
+    class StopAfterWiring(Exception):
+        pass
+
+    built: list = []
+
+    def spy(*args, **kwargs):
+        built.append(kwargs.get("hotkey", ""))
+        raise StopAfterWiring
+
+    monkeypatch.setattr(fb, "Indicator", spy)
+
+    launcher = (
+        va_main._run_app_mac if platform_name == "darwin"
+        else va_main._run_app_windows
+    )
+    with pytest.raises(StopAfterWiring):
+        launcher(config_path)
+
+    assert built, "no Indicator was constructed"
+    # Not a hardcoded display string: whatever parse_hotkey/str() does to
+    # "ctrl+alt+d" today is what the launcher must hand over too, so this
+    # stays correct if the display format ever changes.
+    assert built[0] == str(parse_hotkey("ctrl+alt+d")), built[0]

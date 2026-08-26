@@ -260,3 +260,79 @@ def test_esc_is_not_stolen_when_it_is_the_hotkey():
     ctl.on_key_event(ESC, True)
 
     assert ctl.state is State.RECORDING
+
+
+# --- Task 8: the Flow Bar's Stop/Cancel controls -----------------------
+#
+# `request_stop`/`request_cancel` are the click channel's other end. Both
+# are called from the UI thread (a mouse click on the strip); the controller
+# is already driven from the hotkey thread and the tick thread, so a request
+# is *recorded* rather than performed, and `tick` -- the pump every other
+# transition already goes through -- is what actually does it. These tests
+# use the same `build`/`record` rig as gate 3 above.
+
+
+def test_request_cancel_discards_the_recording():
+    """Gate 4c. A clicked Cancel must do exactly what Esc does."""
+    ctl, parts = build("f8")
+    record(ctl, parts, "f8")
+
+    ctl.request_cancel()
+    ctl.tick()
+
+    assert ctl.state is State.IDLE
+    assert parts["recorder"].is_recording is False
+    assert parts["transcriber"].calls == []
+
+
+def test_request_stop_transcribes_rather_than_discarding():
+    ctl, parts = build("f8")
+    record(ctl, parts, "f8")
+
+    ctl.request_stop()
+    ctl.tick()
+
+    assert ctl.state is State.IDLE
+    assert parts["transcriber"].calls != []
+
+
+def test_a_request_is_performed_by_tick_not_by_the_caller():
+    """The controller is already driven from the hotkey thread and the tick
+    thread. A click arrives on a third -- the UI thread -- so the request is
+    recorded and the existing pump performs it, rather than three threads
+    mutating the state machine directly."""
+    ctl, parts = build("f8")
+    record(ctl, parts, "f8")
+
+    ctl.request_cancel()
+    assert ctl.state is State.RECORDING
+
+    ctl.tick()
+    assert ctl.state is State.IDLE
+
+
+def test_a_request_while_idle_is_ignored():
+    """Clicking Stop on a bar that is not recording must be harmless. The
+    strip hides its controls outside RECORDING, but a click can still land in
+    the frame between the state changing and the redraw."""
+    ctl, parts = build("f8")
+
+    ctl.request_stop()
+    ctl.request_cancel()
+    ctl.tick()
+
+    assert ctl.state is State.IDLE
+
+
+def test_only_the_latest_request_is_kept():
+    """Two clicks in one frame are one action, not two: Cancel arriving after
+    Stop must win outright, not queue behind it."""
+    ctl, parts = build("f8")
+    record(ctl, parts, "f8")
+
+    ctl.request_stop()
+    ctl.request_cancel()
+    ctl.tick()
+
+    assert ctl.state is State.IDLE
+    assert parts["transcriber"].calls == []

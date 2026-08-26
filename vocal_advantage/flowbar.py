@@ -26,6 +26,7 @@ from __future__ import annotations
 import queue
 from dataclasses import dataclass
 
+from vocal_advantage import panel
 from vocal_advantage import waveform as wf
 
 IDLE = "idle"
@@ -51,30 +52,22 @@ MESSAGE_FRAMES = 90
 MESSAGE_CHAR_WIDTH = 5.5
 MESSAGE_PADDING = 22.0
 
-#: The states that show the legend -- the line saying how to stop and how to
-#: cancel.
+#: The states that open the panel. Everything else rests as the pill.
+#:
+#: A message is deliberately absent: it widens the pill to fit its text, as it
+#: always has, but it does not open the panel. A panel is for dictating, and
+#: "could not paste" should not need one.
+PANEL_STATES = frozenset({RECORDING, TRANSCRIBING})
+
+#: The states that show the strip's right-hand controls.
 #:
 #: RECORDING only, and the exclusions are each a decision. Not IDLE: the
 #: resting pill is what sits over your work all day, and a standing reminder of
 #: a key you are not currently holding is clutter. Not MESSAGE: "could not
 #: paste" is urgent and a reminder is not. Not TRANSCRIBING either, which is
 #: the one that looks wrong and is not -- once the model has the audio, no key
-#: stops it and none bins the result, so anything the legend said there would
-#: be false.
-LEGEND_STATES = frozenset({RECORDING})
-
-#: Rough advance width of the legend font, in points per character.
-#:
-#: **Deliberately an over-estimate.** This started at 4.6 -- scaled down from
-#: MESSAGE_CHAR_WIDTH because the legend is set smaller -- and that was the
-#: wrong direction: a proportionally *smaller* allowance than the message gets
-#: is how "F8 stops · esc cancels" came out on screen as "F8 stops ·". The
-#: renderer cannot widen the pill at draw time, so anything this does not
-#: allow for is silently cut off at the pill's edge. A few points of slack
-#: shows as a slightly wider gap before the bars, which nobody can see.
-LEGEND_CHAR_WIDTH = 5.4
-#: Between the legend and the bars, so the text does not crowd the trace.
-LEGEND_GAP = 16.0
+#: stops it and none bins the result, so anything shown there would be false.
+CONTROL_STATES = frozenset({RECORDING})
 
 # --- how bright the pill and its bars are in each state ---------------------
 # The pill brightens slightly while recording; idle is dimmer than everything
@@ -116,17 +109,6 @@ def message_width(text: str) -> float:
     )
 
 
-def legend_width(text: str) -> float:
-    """How wide the pill has to be to hold `text` *and* the bars.
-
-    Unlike a message, the legend does not replace the trace -- it sits beside
-    it -- so this is the resting width plus the text, not a maximum of the two.
-    """
-    if not text:
-        return float(wf.PILL_WIDTH)
-    return float(wf.PILL_WIDTH) + LEGEND_GAP + len(text) * LEGEND_CHAR_WIDTH
-
-
 def _ease(current: float, target: float, alpha: float) -> float:
     return current + (target - current) * alpha
 
@@ -142,12 +124,17 @@ class Frame:
     pill_alpha: float
     bar_alpha: float
     text_alpha: float
-    #: How to stop and how to cancel. Empty in every state but RECORDING, so a
-    #: renderer can draw it unconditionally.
-    #:
-    #: Last, and defaulted, because it is additive: a renderer or a test that
-    #: was building Frames before this existed still builds valid ones.
-    legend: str = ""
+    #: 0 = the resting pill, 1 = the open panel. The single scalar the whole
+    #: grow derives from: width, height, radius, bar count and strip opacity
+    #: are all read off it, so no two of them can fall out of step.
+    open: float = 0.0
+    height: float = float(wf.PILL_HEIGHT)
+    radius: float = panel.PILL_RADIUS
+    #: The strip's right-hand controls. Empty in every state but RECORDING.
+    strip: tuple[panel.StripItem, ...] = ()
+    #: The id of the item under the cursor, or "". Supplied by the platform
+    #: layer, which is the only thing that knows where the cursor is.
+    hover: str = ""
 
 
 class Indicator:
@@ -160,8 +147,9 @@ class Indicator:
     def __init__(
         self,
         level_source=None,
-        n_bars: int = wf.BAR_COUNT,
-        legend: str = "",
+        n_bars: int = wf.BUFFER_BARS,
+        hotkey: str = "",
+        cancel_key: str = "",
     ) -> None:
         #: A zero-argument callable returning the current mic RMS, or None.
         #: `Recorder.level` is what production passes. Kept as a callable so
@@ -169,9 +157,10 @@ class Indicator:
         #: the whole state machine with a lambda.
         self._level_source = level_source
         self._n_bars = n_bars
-        #: Composed by the caller, because the hotkey it names lives in
-        #: main.py and this module deliberately knows nothing about hotkeys.
-        self._legend = legend
+        #: Named by the caller, because the hotkey lives in main.py and this
+        #: module deliberately knows nothing about hotkeys.
+        self._hotkey = hotkey
+        self._cancel_key = cancel_key
 
         self._commands: "queue.Queue[tuple[str, str]]" = queue.Queue()
         self._mode = IDLE
@@ -195,6 +184,7 @@ class Indicator:
         self._pill_alpha = PILL_ALPHA[IDLE]
         self._bar_alpha = BAR_ALPHA[IDLE]
         self._text_alpha = TEXT_ALPHA[IDLE]
+        self._open = 0.0
 
     # --- callable from any thread ------------------------------------------
 
@@ -224,6 +214,25 @@ class Indicator:
         self._state_name = MESSAGE
         self._commands.put((MESSAGE, message))
 
+    def set_keys(self, hotkey: str, cancel_key: str) -> None:
+        """Update the strip's key caps after a runtime hotkey change.
+
+        Plain attribute assignment, exactly like `_status`/`_state_name`
+        above: safe to call from the thread that changes the hotkey (the
+        tray's "Change hotkey" worker thread) because `_strip()` only ever
+        reads a whole `str` object on the render thread, and CPython never
+        hands back a half-written one.
+
+        Both keys always travel together, not two separate setters, because
+        they are one invariant: `cancel_key` must be `""` exactly when
+        `hotkey` is Esc -- the same rule `main.py`'s construction sites apply
+        (`"" if CANCEL_KEY in spec.keys else CANCEL_KEY`) -- and a caller that
+        set only one could leave a Cancel control advertised beside an Esc
+        that `_handle_down` will never let it fire against.
+        """
+        self._hotkey = hotkey
+        self._cancel_key = cancel_key
+
     def state_name(self) -> str:
         """The raw state, for the tray's status dot. Safe from any thread."""
         return self._state_name
@@ -234,8 +243,13 @@ class Indicator:
 
     # --- render thread only -------------------------------------------------
 
-    def next_frame(self) -> Frame:
-        """Drain, advance one frame of motion, and return what to draw."""
+    def next_frame(self, hover: str = "") -> Frame:
+        """Drain, advance one frame of motion, and return what to draw.
+
+        `hover` comes from the platform layer, which is the only thing that
+        knows where the cursor is. It is one frame stale by the time it is
+        drawn, which at 60fps nobody can see.
+        """
         while True:
             try:
                 self._mode, self._text = self._commands.get_nowait()
@@ -246,13 +260,17 @@ class Indicator:
         if self._mode == MESSAGE and self._frames >= MESSAGE_FRAMES:
             self._mode, self._text = IDLE, ""
 
-        self._heights = self._advance_wave()
+        heights = self._advance_wave()
 
-        legend = self._legend if self._mode in LEGEND_STATES else ""
+        self._open = _ease(
+            self._open, 1.0 if self._mode in PANEL_STATES else 0.0, FADE_ALPHA
+        )
         target_width = (
-            message_width(self._text)
+            panel.PANEL_WIDTH
+            if self._mode in PANEL_STATES
+            else message_width(self._text)
             if self._mode == MESSAGE
-            else legend_width(legend)
+            else float(wf.PILL_WIDTH)
         )
         self._width = _ease(self._width, target_width, FADE_ALPHA)
         self._pill_alpha = _ease(
@@ -265,17 +283,46 @@ class Indicator:
             self._text_alpha, TEXT_ALPHA[self._mode], FADE_ALPHA
         )
 
+        # Sliced, not regenerated: the buffer always holds BUFFER_BARS of real
+        # history and the pill shows a window onto its newest. Index 0 is the
+        # newest, so this keeps the recent end and drops the old.
+        self._heights = heights[: panel.bars_for_open(self._open)]
+
         self._frames += 1
         return Frame(
             state=self._mode,
             heights=self._heights,
             text=self._text if self._mode == MESSAGE else "",
-            legend=legend,
             width=self._width,
             pill_alpha=self._pill_alpha,
             bar_alpha=self._bar_alpha,
             text_alpha=self._text_alpha,
+            open=self._open,
+            height=panel.lerp(
+                float(wf.PILL_HEIGHT), panel.PANEL_HEIGHT, self._open
+            ),
+            radius=panel.lerp(
+                panel.PILL_RADIUS, panel.PANEL_RADIUS, self._open
+            ),
+            strip=self._strip(),
+            hover=hover,
         )
+
+    def _strip(self) -> tuple[panel.StripItem, ...]:
+        """The strip's right-hand controls, for this state.
+
+        Cancel is dropped when `cancel_key` is empty, which is how the caller
+        says Esc is itself the hotkey. `_handle_down` gives the hotkey
+        precedence there, so a Cancel control would be advertising something
+        that cannot happen -- the rule `legend_for` already enforced, moved
+        onto the strip rather than lost with the legend.
+        """
+        if self._mode not in CONTROL_STATES:
+            return ()
+        items = [panel.StripItem("stop", "Stop", self._hotkey)]
+        if self._cancel_key:
+            items.append(panel.StripItem("cancel", "Cancel", self._cancel_key))
+        return tuple(items)
 
     # --- internals ----------------------------------------------------------
 

@@ -35,8 +35,10 @@ import threading
 import time
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
+from vocal_advantage import flowbar
+from vocal_advantage import panel
 from vocal_advantage import waveform as wf
 from vocal_advantage.console import warn
 
@@ -80,10 +82,6 @@ FPS = 60
 SIDE_MARGIN = 24
 MESSAGE_FONT_SIZE = 11
 
-#: Matches flowbar_mac's palette exactly. If these two ever drift the pill will
-#: look like a different app on the other machine.
-PILL_FILL_RGB = (247, 246, 241)
-BAR_RGB = (0, 0, 0)
 #: Rendered at this multiple and scaled down: Pillow has no antialiasing, and
 #: the whole reason for this file is that the corners should not be jagged.
 SUPERSAMPLE = 4
@@ -163,6 +161,8 @@ if sys.platform == "win32":  # pragma: no cover - Windows only
     _user32.SetWindowLongW.restype = wintypes.LONG
     _user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
     _user32.ReleaseCapture.argtypes = []
+    _user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+    _user32.GetCursorPos.restype = wintypes.BOOL
 
     class WNDCLASSEXW(ctypes.Structure):
         _fields_ = [
@@ -203,13 +203,23 @@ def set_dpi_awareness() -> None:
         )
 
 
-def pill_origin(position: str, width: float, screen_width: int, screen_height: int):
+def pill_origin(
+    position: str, width: float, height: float, screen_width: int, screen_height: int
+):
     """Top-left corner of the pill, in Windows screen coordinates (y is down).
 
     The macOS twin measures from the bottom up, because that is how AppKit's
     coordinates run. Same result on screen, opposite arithmetic -- which is
     exactly the sort of thing that silently puts the bar off the top of one
     machine, hence a test for each.
+
+    ``height`` is the *live* frame height, not a hardcoded ``wf.PILL_HEIGHT``
+    -- gate 3c: the panel opens upward from a stationary bottom edge. The
+    anchor is ``screen_height - SCREEN_MARGIN`` (the bottom edge), and ``y``
+    -- the top edge -- must fall as ``height`` rises to keep that bottom edge
+    fixed while the pill grows into the 96pt panel. Getting the sign backwards
+    here reads as a plausible picture (the bar still appears, still animates)
+    and only shows up as the bottom edge sliding down the screen.
     """
     if position == "bottom-left":
         x = SIDE_MARGIN
@@ -217,7 +227,7 @@ def pill_origin(position: str, width: float, screen_width: int, screen_height: i
         x = screen_width - width - SIDE_MARGIN
     else:
         x = (screen_width - width) / 2.0
-    return int(round(x)), int(round(screen_height - wf.SCREEN_MARGIN - wf.PILL_HEIGHT))
+    return int(round(x)), int(round(screen_height - wf.SCREEN_MARGIN - height))
 
 
 def point_origin(point, width: float, height: float, screen_width: int,
@@ -246,35 +256,110 @@ def point_origin(point, width: float, height: float, screen_width: int,
     return int(round(x)), int(round(y))
 
 
+def _gradient(draw, rect, top_rgb, bottom_rgb, alpha, scale):
+    """A vertical blend, drawn a row at a time.
+
+    Pillow has no gradient primitive. One horizontal line per pixel row is
+    crude and exactly good enough: the bands are under 60pt tall and this
+    renders once per frame into a supersampled buffer.
+    """
+    height = max(1.0, rect.h * scale)
+    for step in range(int(height)):
+        t = step / height
+        colour = tuple(
+            int(round(top_rgb[i] + (bottom_rgb[i] - top_rgb[i]) * t))
+            for i in range(3)
+        )
+        y = rect.y * scale + step
+        draw.rectangle(
+            (rect.x * scale, y, (rect.x + rect.w) * scale - 1, y),
+            fill=colour + (alpha,),
+        )
+
+
 def render_frame(frame, width: int, height: int) -> Image.Image:
     """One `flowbar.Frame` as an RGBA image. Pure: no Win32, no window.
 
     Kept importable and callable on any platform on purpose -- it is the half of
     this file that can be looked at from the Mac, by saving the result to a PNG.
+
+    Every rect this draws comes from `panel.layout`, exactly as
+    `flowbar_mac._PillView.drawRect_` does -- neither renderer computes a rect
+    of its own, which is the whole reason `panel.py` exists.
     """
     scale = SUPERSAMPLE
     image = Image.new("RGBA", (width * scale, height * scale), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
     alpha = int(round(_clamp01(frame.pill_alpha) * 255))
-    radius = height * scale / 2.0      # fully rounded ends
+    placed = panel.layout(
+        float(width), float(height), frame.radius, frame.open,
+        flowbar.STATUS_TEXT.get(frame.state, ""), frame.strip,
+    )
+    radius = frame.radius * scale
 
-    # Fill only, no outline, on the full bounds -- matching flowbar_mac. The
-    # edge of the fill is what defines the shape now.
+    # The pill's single fill fades out as the panel's two bands fade in, so
+    # the shape is never momentarily both and never momentarily neither --
+    # matching flowbar_mac's drawRect_ exactly.
+    if frame.open < 0.999:
+        draw.rounded_rectangle(
+            (0, 0, width * scale - 1, height * scale - 1),
+            radius=radius,
+            fill=panel.PILL_FILL_RGB
+            + (int(round(alpha * (1.0 - frame.open))),),
+        )
+    if frame.open > 0.001:
+        band_alpha = int(round(alpha * frame.open))
+        _gradient(draw, placed.band, panel.BAND_TOP_RGB,
+                  panel.BAND_BOTTOM_RGB, band_alpha, scale)
+        _gradient(draw, placed.strip, panel.STRIP_TOP_RGB,
+                  panel.STRIP_BOTTOM_RGB, band_alpha, scale)
+        draw.rectangle(
+            (placed.hairline.x * scale, placed.hairline.y * scale,
+             placed.hairline.right * scale - 1,
+             placed.hairline.bottom * scale - 1),
+            fill=panel.HAIRLINE_RGB + (band_alpha,),
+        )
+        # Clip the square-cornered gradients back to the rounded shape by
+        # punching the corners out with a rounded-rectangle mask. AppKit gets
+        # this for free from a clip on the graphics context; Pillow has no
+        # such thing, so the mask does the same job after the fact.
+        mask = Image.new("L", image.size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, width * scale - 1, height * scale - 1),
+            radius=radius, fill=255,
+        )
+        image.putalpha(
+            Image.composite(image.getchannel("A"),
+                            Image.new("L", image.size, 0), mask)
+        )
+        draw = ImageDraw.Draw(image)
+
+    # Unconditional, matching flowbar_mac's drawRect_: the border strokes the
+    # pill at rest just as it strokes the open panel, so it cannot vanish for
+    # every closed-panel frame -- which is most of them, since `open` defaults
+    # to 0.0 and every resting-pill frame lives at or near it. Uses `alpha`
+    # (pill_alpha), not `band_alpha`: the border's own opacity, not the
+    # gradient bands' faded-in one.
     draw.rounded_rectangle(
         (0, 0, width * scale - 1, height * scale - 1),
-        radius=radius,
-        fill=PILL_FILL_RGB + (alpha,),
+        radius=radius, outline=panel.BORDER_RGB + (alpha,),
+        width=max(1, int(scale)),
     )
 
     bar_alpha = int(round(_clamp01(frame.bar_alpha) * 255))
-    if bar_alpha > 2:
-        centre_y = height * scale / 2.0
-        max_half = (height / 2.0 - wf.BAR_MARGIN_Y) * scale
+    if bar_alpha > 2 and placed.band.h > 0:
+        centre_y = (placed.band.y + placed.band.h / 2.0) * scale
+        # `panel.PEAK_FRACTION` is 69% of band height at peak, mirrored -- so
+        # the tallest bar's half is half of that. See panel.py for why this
+        # is not a bare float here. Taken from `placed.band`, not the raw
+        # pill height, so the resting pill (whose band *is* the whole pill --
+        # see `panel.bands`) and the open panel use the identical rule.
+        max_half = placed.band.h * panel.PEAK_FRACTION / 2.0 * scale
         bar_width = wf.BAR_WIDTH * scale
         for x, normalised in zip(
-            wf.bar_layout(width * scale, len(frame.heights), bar_width,
-                          wf.BAR_GAP * scale),
+            wf.bar_layout(placed.band.w * scale, len(frame.heights),
+                          bar_width, wf.BAR_GAP * scale),
             frame.heights,
         ):
             half = normalised * max_half
@@ -282,13 +367,96 @@ def render_frame(frame, width: int, height: int) -> Image.Image:
             # rather than squashing into ellipses at rest.
             total = max(bar_width, half * 2.0)
             draw.rounded_rectangle(
-                (x - bar_width / 2.0, centre_y - total / 2.0,
-                 x + bar_width / 2.0, centre_y + total / 2.0),
+                (placed.band.x * scale + x - bar_width / 2.0,
+                 centre_y - total / 2.0,
+                 placed.band.x * scale + x + bar_width / 2.0,
+                 centre_y + total / 2.0),
                 radius=bar_width / 2.0,
-                fill=BAR_RGB + (bar_alpha,),
+                fill=panel.BAR_RGB + (bar_alpha,),
             )
 
-    return _mirrored(image).resize((width, height), Image.LANCZOS)
+    # Same test `_draw_strip` uses internally to decide whether to draw at
+    # all, so this guard and the one inside it cannot disagree about whether
+    # the strip is visible this frame -- mirroring flowbar_mac's drawRect_.
+    if panel.strip_alpha(placed.strip.h) > 0.0:
+        _draw_strip(draw, placed, frame, scale)
+
+    # `_mirrored` forces symmetry about the horizontal centre line, which is
+    # right for a pill and actively wrong for a panel: the two bands differ by
+    # design, and mirroring would paint the waveform band over the strip.
+    if frame.open < 0.001:
+        image = _mirrored(image)
+    return image.resize((width, height), Image.LANCZOS)
+
+
+def _draw_strip(draw, placed, frame, scale) -> None:
+    """The dot, the state word, and each control beside its own key cap.
+
+    Alpha rides the strip's own real height against what its tallest content
+    needs -- `panel.strip_alpha` -- not `frame.open` directly. A part-grown
+    strip can be shorter than the 20pt key cap it holds, and at any alpha that
+    cap still clips against the panel's rounded corner; waiting until the
+    strip can actually hold its contents is what `strip_alpha` buys instead.
+    Exactly `flowbar_mac._PillView._draw_strip`'s reasoning, so both
+    renderers use the identical ramp.
+    """
+    alpha = int(round(panel.strip_alpha(placed.strip.h) * 255))
+    if alpha <= 0:
+        return
+
+    def font(size):
+        try:
+            return ImageFont.load_default(size * scale)
+        except TypeError:      # Pillow < 10.1 takes no size argument
+            return ImageFont.load_default()
+
+    if placed.dot is not None:
+        rgb = (panel.DOT_TRANSCRIBING_RGB
+               if frame.state == flowbar.TRANSCRIBING
+               else panel.DOT_RECORDING_RGB)
+        draw.ellipse(
+            (placed.dot.x * scale, placed.dot.y * scale,
+             placed.dot.right * scale, placed.dot.bottom * scale),
+            fill=rgb + (alpha,),
+        )
+    if placed.state_rect is not None and placed.state_label:
+        draw.text(
+            (placed.state_rect.x * scale, placed.state_rect.y * scale),
+            placed.state_label, font=font(panel.LABEL_FONT_SIZE),
+            fill=panel.TEXT_RGB + (alpha,),
+        )
+    for item in placed.items:
+        if item.id == frame.hover:
+            draw.rounded_rectangle(
+                (item.hover_rect.x * scale, item.hover_rect.y * scale,
+                 item.hover_rect.right * scale, item.hover_rect.bottom * scale),
+                radius=item.hover_rect.h * scale / 2.0,
+                fill=panel.HOVER_FILL_RGB + (alpha,),
+            )
+        draw.text(
+            (item.label_rect.x * scale, item.label_rect.y * scale),
+            item.label, font=font(panel.LABEL_FONT_SIZE),
+            fill=panel.TEXT_RGB + (alpha,),
+        )
+        if item.cap_rect is not None:
+            draw.rounded_rectangle(
+                (item.cap_rect.x * scale, item.cap_rect.y * scale,
+                 item.cap_rect.right * scale, item.cap_rect.bottom * scale),
+                radius=panel.CAP_RADIUS * scale,
+                fill=panel.CAP_FILL_RGB + (alpha,),
+            )
+            draw.text(
+                ((item.cap_rect.x + panel.CAP_PAD_X) * scale,
+                 (item.cap_rect.y + 4.0) * scale),
+                item.cap, font=font(panel.CAP_FONT_SIZE),
+                fill=panel.TEXT_RGB + (alpha,),
+            )
+    if placed.divider is not None:
+        draw.rectangle(
+            (placed.divider.x * scale, placed.divider.y * scale,
+             placed.divider.right * scale, placed.divider.bottom * scale),
+            fill=panel.HAIRLINE_RGB + (alpha,),
+        )
 
 
 def _mirrored(image: Image.Image) -> Image.Image:
@@ -341,19 +509,31 @@ class FlowBar:
 
     def __init__(
         self, indicator, position: str = "bottom-centre", fps: int = FPS,
-        point=None,
+        point=None, on_click=None,
     ) -> None:
         self._indicator = indicator
         self._position = position if position in POSITIONS else "bottom-centre"
         self._fps = fps
         #: (centre_x, bottom_y) once dragged, else None to use `position`.
         self._point = list(point) if point else None
+        #: Called with a strip item's id on click. Task 8 supplies it; this
+        #: task only builds the channel, so None (the default) is a no-op.
+        self._on_click = on_click
         self._movable = False
         self._hwnd = None
         self._width = int(wf.PILL_WIDTH)
         self._stop = threading.Event()
         self._thread = None
         self._wndproc = None      # must outlive the window or Windows calls freed memory
+        #: What was last drawn, for hit-testing the *next* poll's cursor
+        #: sample against, and what the window procedure reads to dispatch a
+        #: click. One frame stale, which at 60fps nobody can see.
+        self._last_layout = None
+        self._last_origin = (0.0, 0.0)
+        self._hover = ""
+        #: Whether the cursor was inside the panel as of the last draw that
+        #: changed it -- so WS_EX_TRANSPARENT is only touched on a transition.
+        self._interactive = False
 
     def open(self) -> None:
         """Start the render thread. Returns as soon as it is running."""
@@ -445,9 +625,25 @@ class FlowBar:
         _user32.ShowWindow(self._hwnd, SW_SHOWNOACTIVATE)
 
     def _draw(self) -> None:
-        frame = self._indicator.next_frame()
+        point = POINT()
+        _user32.GetCursorPos(ctypes.byref(point))
+        hover = self._hover_for(float(point.x), float(point.y))
+        inside = self._contains(float(point.x), float(point.y))
+        if inside != self._interactive:
+            self._interactive = inside
+            # Move bar mode owns this bit while it is on; never fight it.
+            if not self.movable:
+                style = _user32.GetWindowLongW(self._hwnd, GWL_EXSTYLE)
+                style = (
+                    (style & ~WS_EX_TRANSPARENT) if inside
+                    else (style | WS_EX_TRANSPARENT)
+                )
+                _user32.SetWindowLongW(self._hwnd, GWL_EXSTYLE, style)
+        self._hover = hover
+
+        frame = self._indicator.next_frame(hover=hover)
         width = int(round(frame.width))
-        height = int(wf.PILL_HEIGHT)
+        height = int(round(frame.height))
         if width != self._width:
             self._width = width
             self._reposition(width, height)
@@ -493,13 +689,66 @@ class FlowBar:
         _gdi32.DeleteDC(mem_dc)
         _user32.ReleaseDC(None, screen_dc)
 
+        # Recorded for the *next* draw's hit-test: `_hover_for`/`_contains`
+        # must be pure, so they read this rather than the frame just drawn.
+        self._last_origin = self._origin(width, height)
+        self._last_layout = panel.layout(
+            float(width), float(height), frame.radius, frame.open,
+            flowbar.STATUS_TEXT.get(frame.state, ""), frame.strip,
+        )
+
+    def _hover_for(self, screen_x: float, screen_y: float) -> str:
+        """Which strip item the cursor is over, in screen coordinates.
+
+        Pure, so it is testable without a window or a cursor. Windows screen
+        coordinates are already top-left origin, so -- unlike the macOS twin
+        of this method -- no y-flip is needed.
+        """
+        placed = self._last_layout
+        if placed is None:
+            return ""
+        origin_x, origin_y = self._last_origin
+        return panel.hit_test(
+            placed, screen_x - origin_x, screen_y - origin_y
+        ) or ""
+
+    def _contains(self, screen_x: float, screen_y: float) -> bool:
+        """Whether a screen point falls inside the last drawn panel, AND the
+        panel actually has something in it to click.
+
+        This is what decides click-through, not `_hover_for`: the window
+        should stop ignoring clicks as soon as the cursor is anywhere over
+        it, not only over a strip item -- but only in a state that has
+        controls at all. Without the `placed.items` check, the resting pill
+        and the TRANSCRIBING panel (which opens but, by design, offers zero
+        controls) both ate every click that crossed them, including ones
+        meant for whatever sits underneath -- the taskbar, at the resting
+        pill's position.
+
+        `panel.strip_alpha(placed.strip.h) > 0.0` is the same test
+        `_draw_strip` gates drawing on, so a part-grown strip cannot be
+        clickable before it is visible: `panel.layout` builds `items` as soon
+        as the strip has any height at all, well before `strip_alpha` says
+        there is anything to see.
+        """
+        placed = self._last_layout
+        if placed is None:
+            return False
+        if not placed.items or panel.strip_alpha(placed.strip.h) <= 0.0:
+            return False
+        origin_x, origin_y = self._last_origin
+        return (
+            origin_x <= screen_x < origin_x + placed.width
+            and origin_y <= screen_y < origin_y + placed.height
+        )
+
     def _origin(self, width: int, height: int):
         """Where the pill goes: a dragged point if there is one, else a preset."""
         screen_w = _user32.GetSystemMetrics(SM_CXSCREEN)
         screen_h = _user32.GetSystemMetrics(SM_CYSCREEN)
         if self._point is not None:
             return point_origin(self._point, width, height, screen_w, screen_h)
-        return pill_origin(self._position, width, screen_w, screen_h)
+        return pill_origin(self._position, width, height, screen_w, screen_h)
 
     # -- move mode ----------------------------------------------------------
 
@@ -557,12 +806,22 @@ _WINDOWS: dict = {}
 def _default_wndproc(hwnd, message, wparam, lparam):  # pragma: no cover - Windows
     if message == WM_LBUTTONDOWN:
         bar = _WINDOWS.get(int(hwnd) if hwnd else 0)
-        if bar is not None and bar.movable:
-            # Hand the drag to Windows rather than tracking the mouse
-            # ourselves: it runs its own modal move loop, so there is no
-            # capture to leak, no timer, and it behaves like every other
-            # window on the machine -- including snapping and Esc to cancel.
-            _user32.ReleaseCapture()
-            _user32.SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
-            return 0
+        if bar is not None:
+            # A click on a hovered strip item takes priority and never starts
+            # a drag. Task 8 wires the callback; until then `_on_click` is
+            # None and this is a no-op, exactly like move mode being off.
+            hover = getattr(bar, "_hover", "")
+            callback = getattr(bar, "_on_click", None)
+            if hover and callback is not None:
+                callback(hover)
+                return 0
+            if bar.movable:
+                # Hand the drag to Windows rather than tracking the mouse
+                # ourselves: it runs its own modal move loop, so there is no
+                # capture to leak, no timer, and it behaves like every other
+                # window on the machine -- including snapping and Esc to
+                # cancel.
+                _user32.ReleaseCapture()
+                _user32.SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
+                return 0
     return _user32.DefWindowProcW(hwnd, message, wparam, lparam)

@@ -40,11 +40,25 @@ PILL_HEIGHT = 30
 #: Half the height, so the ends are fully round -- a lozenge, not a rounded box.
 PILL_RADIUS = PILL_HEIGHT / 2
 
+#: How many bars the *resting pill* shows. The buffer is longer; see
+#: BUFFER_BARS.
 BAR_COUNT = 15
-BAR_WIDTH = 1.5
-BAR_GAP = 2.2
-#: Clearance between the tallest bar and the pill's edge. 15 bars of 1.5px with
-#: 2.2px gaps is 53px of content, which leaves 12px margins inside a 78px pill.
+#: Bar and gap are equal, which is what makes a bar-style waveform read as a
+#: hi-fi VU meter rather than a chart. Measured off superwhisper at 2.0/2.0
+#: (4px each in a 2x capture); ours were 1.5/2.2, a 1.47:1 ratio that looked
+#: airier and less like the thing being copied.
+BAR_WIDTH = 2.0
+BAR_GAP = 2.0
+#: The full trace history, in bars. The panel draws all of them; the pill draws
+#: a window onto the newest few, so growing the panel *reveals* history rather
+#: than resetting the trace.
+#:
+#: 69 bars at a 4.0 pitch is 274pt of content, 65% of the 420pt panel -- against
+#: superwhisper's measured ~66%. At SCROLL_FRAMES = 6 and 60fps that is 6.9
+#: seconds of visible history, up from 1.5.
+BUFFER_BARS = 69
+#: Clearance between the tallest bar and the pill's edge. 15 bars of 2.0 with
+#: 2.0 gaps is 58pt of content, which leaves 10pt margins inside a 78pt pill.
 #: Those margins are load-bearing, not slack: the ends are fully round, so a bar
 #: pushed much closer to the edge sits under the curve of the cap and clips
 #: against it when the level is high.

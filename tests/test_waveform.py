@@ -382,3 +382,36 @@ def test_wave_survives_a_nan_level():
 
 def test_wave_clamps_a_level_outside_the_unit_range():
     assert all(h <= 1.0 for h in run(wf.ScrollingWave(15), 4.0, 120))
+
+
+def test_bars_and_gaps_are_equal_width():
+    """Superwhisper's trace is 1:1 bar-to-gap; ours was 1.5 : 2.2."""
+    assert wf.BAR_WIDTH == wf.BAR_GAP
+
+
+def test_fifteen_bars_still_clear_the_pill_ends():
+    """The pill's ends are round, so bars must not reach the cap's curve.
+
+    15 bars at a 4.0 pitch is 58pt of content in a 78pt pill, leaving 10pt
+    margins. That is tighter than the 12pt they had at 1.5/2.2 and still
+    clear -- but it is the number BAR_MARGIN_Y's docstring is about, so it
+    gets asserted rather than assumed.
+    """
+    content = wf.BAR_COUNT * wf.BAR_WIDTH + (wf.BAR_COUNT - 1) * wf.BAR_GAP
+    assert content == 58.0
+    assert (wf.PILL_WIDTH - content) / 2.0 == 10.0
+
+
+def test_buffer_holds_enough_history_for_the_panel():
+    """69 bars at a 4.0 pitch is 274pt -- 65% of a 420pt panel, against
+    superwhisper's measured ~66%."""
+    assert wf.BUFFER_BARS == 69
+    content = wf.BUFFER_BARS * wf.BAR_WIDTH + (wf.BUFFER_BARS - 1) * wf.BAR_GAP
+    assert content == 274.0
+
+
+def test_buffer_holds_about_seven_seconds():
+    """BUFFER_BARS * SCROLL_FRAMES / fps, the one number that sets how much
+    history is visible. 69 * 6 / 60 = 6.9s, up from 15 * 6 / 60 = 1.5s."""
+    seconds = wf.BUFFER_BARS * wf.SCROLL_FRAMES / 60.0
+    assert 6.8 < seconds < 7.0

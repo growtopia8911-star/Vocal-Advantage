@@ -57,6 +57,14 @@ MUTEX_NAME = r"Local\VocalAdvantageSingleInstance"
 ERROR_ALREADY_EXISTS = 183
 
 TICK_INTERVAL_S = 1.0  # how often the controller's 300s watchdog gets a chance to fire
+#: Enqueued by a Flow Bar click (`_make_activate`) to wake `controller_loop`
+#: immediately, the way a keypress already does. `request_stop`/`request_cancel`
+#: only set a flag on the controller -- nothing about that unblocks a loop
+#: parked in `events.get(timeout=...)`, so without this a click could sit
+#: unacted-on for up to `tick_interval_s`. An `object()`, not a string or a
+#: (key_name, is_down) tuple, so the loop can tell it apart from both a real
+#: key event and the `None` shutdown sentinel without risking a collision.
+WAKE_SENTINEL = object()
 # The live loop's wake-up interval, NOT the transcription cadence -- that is
 # self-paced inside LiveDictation from the measured cost of each pass, so fast
 # hardware transcribes as often as it can afford and slow hardware backs off.
@@ -447,6 +455,15 @@ def controller_loop(
         if item is None:
             break
 
+        if item is WAKE_SENTINEL:
+            # A Flow Bar click already recorded its request on the controller
+            # (`request_stop`/`request_cancel`); this is what unblocks a loop
+            # sitting in `get()` so it is acted on now, the way a keypress
+            # already is, instead of waiting up to `tick_interval_s`.
+            _safe_call("watchdog tick", controller.tick)
+            next_tick = clock() + tick_interval_s
+            continue
+
         key_name, is_down = item
         _safe_call("key event", controller.on_key_event, key_name, is_down)
 
@@ -663,6 +680,12 @@ class HotkeyChanger:
         self._spec = spec
         # While no hook is installed, so no key event can be in flight.
         self._controller.set_hotkey(spec)
+        # Same rule the construction sites use, so the Stop cap cannot go
+        # stale and the Cancel control cannot outlive the hotkey becoming Esc
+        # (or fail to reappear when it stops being Esc). Gate 2e.
+        self._indicator.set_keys(
+            str(spec), "" if CANCEL_KEY in spec.keys else CANCEL_KEY
+        )
         self._restart(spec)
         say("Hotkey is now %s." % spec)
         self._indicator.flash("hotkey: %s" % spec)
@@ -745,28 +768,7 @@ class _EmptyDictionary:
         return text
 
 
-def legend_for(spec: HotkeySpec) -> str:
-    """What the Flow Bar says while it is recording.
-
-    Composed here rather than in `flowbar.py`, which deliberately knows nothing
-    about hotkeys -- it is handed a finished string and carries it.
-
-    Both halves name the key that performs the action, because that is the one
-    habit worth taking from the researched app: a control and its key sit
-    together, permanently, rather than the key living in a settings pane the
-    user has to go and look at. Until now the hotkey appeared nowhere on screen
-    at all and was knowable only from the README.
-
-    The `esc` half is dropped when esc *is* the hotkey. `_handle_down` gives the
-    hotkey precedence there, so advertising a cancel that cannot happen would
-    make the bar lie about the one thing it is on screen to say.
-    """
-    if CANCEL_KEY in spec.keys:
-        return "%s stops" % spec
-    return "%s stops · %s cancels" % (spec, CANCEL_KEY)
-
-
-def _make_flow_bar(cfg: dict, indicator):
+def _make_flow_bar(cfg: dict, indicator, on_click=None):
     """The overlay, or None if it is switched off or refuses to start.
 
     Never raises. Dictation is the product and the bar is decoration: losing it
@@ -785,6 +787,7 @@ def _make_flow_bar(cfg: dict, indicator):
             indicator,
             position=cfg["flow_bar_position"],
             point=cfg["flow_bar_point"],
+            on_click=on_click,
         )
         bar.open()
         return bar
@@ -793,6 +796,37 @@ def _make_flow_bar(cfg: dict, indicator):
         warn("Dictation and the hotkey are unaffected.")
         warn(traceback.format_exc())
         return None
+
+
+def _make_activate(controller, events: "queue.Queue"):
+    """The Flow Bar's `on_click`: perform a control by the id `panel.hit_test`
+    returned.
+
+    A click and the key it names go through the same request, so they cannot
+    drift into doing two different things. Module-level and taking the
+    controller as an argument -- rather than a closure inline at each call
+    site -- so this dispatch has exactly one implementation to get right and
+    one place a test can reach it: a bare `{"stop": controller.request_stop,
+    ...}.get(item_id)` type-checks and looks correct but returns the method
+    instead of calling it, and does nothing when clicked.
+
+    `events` is the same queue `controller_loop` drains. `request_stop`/
+    `request_cancel` only set a flag on the controller; enqueuing
+    `WAKE_SENTINEL` is what wakes a loop parked in `events.get()` so the click
+    is acted on now rather than at the next scheduled tick -- up to
+    `TICK_INTERVAL_S` later, which is long enough that a mis-aimed second
+    click can land on Cancel and throw the dictation away.
+    """
+    def activate(item_id: str) -> None:
+        action = {
+            "stop": controller.request_stop,
+            "cancel": controller.request_cancel,
+        }.get(item_id)
+        if action is not None:
+            action()
+            events.put(WAKE_SENTINEL)
+
+    return activate
 
 
 def _settings_opener(config_path: Path):
@@ -969,12 +1003,14 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     # by PortAudio's thread and read here lock-free -- there is no second
     # microphone stream anywhere in this project.
     #
-    # No legend here, deliberately. `flowbar_win.render_frame` draws no text --
-    # there is no font in that file, `frame.text` is dropped, and flash
-    # messages have never reached the Windows bar either. Passing one would
-    # widen the pill and stretch the trace to display nothing. It goes back in
-    # the moment that renderer can draw a string.
-    indicator = Indicator(level_source=lambda: recorder.level)
+    # The Windows renderer can draw text as of the panel work, so the hotkey
+    # goes in here too -- the comment that used to sit here explained why it
+    # could not, and that reason is gone.
+    indicator = Indicator(
+        level_source=lambda: recorder.level,
+        hotkey=str(spec),
+        cancel_key="" if CANCEL_KEY in spec.keys else CANCEL_KEY,
+    )
 
     dictionary = _load_dictionary()
     player = _make_player(cfg)
@@ -1030,7 +1066,7 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
 
     # UI last: by here the hotkey already works, so anything below failing
     # costs decoration and never dictation.
-    bar = _make_flow_bar(cfg, indicator)
+    bar = _make_flow_bar(cfg, indicator, on_click=_make_activate(controller, events))
     changer = HotkeyChanger(
         listener=listener, spec=spec, on_key=on_key, controller=controller,
         indicator=indicator, config_path=config_path,
@@ -1129,7 +1165,9 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     # by PortAudio's thread and read lock-free by the renderer. No second
     # microphone stream.
     indicator = Indicator(
-        level_source=lambda: recorder.level, legend=legend_for(spec)
+        level_source=lambda: recorder.level,
+        hotkey=str(spec),
+        cancel_key="" if CANCEL_KEY in spec.keys else CANCEL_KEY,
     )
 
     dictionary = _load_dictionary()
@@ -1205,7 +1243,10 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         warn("No NSApplication, so there is no menu bar icon and no overlay.")
         warn(traceback.format_exc())
 
-    bar = _make_flow_bar(cfg, indicator) if app is not None else None
+    bar = (
+        _make_flow_bar(cfg, indicator, on_click=_make_activate(controller, events))
+        if app is not None else None
+    )
     changer = HotkeyChanger(
         listener=listener, spec=spec, on_key=on_key, controller=controller,
         indicator=indicator, config_path=config_path,

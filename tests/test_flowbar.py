@@ -83,11 +83,14 @@ def test_recording_responds_to_the_audio_level():
 
 
 def test_recording_at_silence_looks_like_idle():
+    # RECORDING now opens the panel, so by 300 frames the trace has widened
+    # past BAR_COUNT bars -- idle_heights sized to whatever the panel is
+    # currently showing is the equivalent check, not a fixed BAR_COUNT one.
     indicator = Indicator(level_source=lambda: 0.0)
     indicator.show_recording()
     frame = drain(indicator, 300)
     assert frame.heights == pytest.approx(
-        wf.idle_heights(wf.BAR_COUNT), abs=1e-3
+        wf.idle_heights(len(frame.heights)), abs=1e-3
     )
 
 

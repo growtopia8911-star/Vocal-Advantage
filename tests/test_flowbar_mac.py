@@ -13,13 +13,23 @@ so this file collects and runs on Windows too.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
+from vocal_advantage import flowbar_mac
 from vocal_advantage import waveform as wf
 from vocal_advantage.flowbar_mac import (
     SIDE_MARGIN,
     pill_origin,
     point_origin,
+)
+
+#: Matches the pattern in test_tray_state.py: skips a case that needs a real
+#: NSObject instance rather than the plain-arithmetic functions everything
+#: else in this file exercises.
+darwin_only = pytest.mark.skipif(
+    sys.platform != "darwin", reason="AppKit, and the target is an NSObject"
 )
 
 
@@ -48,6 +58,16 @@ LAPTOP = FakeFrame(x=0.0, y=70.0, width=1512.0, height=912.0)
 #: A monitor to the right of the built-in display: origin.x is not zero, which
 #: is the case that silently puts the bar on the wrong screen.
 SECOND_MONITOR = FakeFrame(x=1512.0, y=0.0, width=2560.0, height=1440.0)
+
+
+def _a_visible_frame(width: float, height: float) -> FakeFrame:
+    """A fake `visibleFrame` sized like a real display, origin at zero.
+
+    A thin factory over `FakeFrame` rather than a second fake: the panel-growth
+    tests only care about screen size, not origin quirks -- those are already
+    covered above.
+    """
+    return FakeFrame(width=width, height=height)
 
 
 def test_bottom_centre_is_horizontally_centred():
@@ -171,3 +191,317 @@ def test_a_pill_wider_than_the_screen_still_lands_somewhere_sane():
     x, y = point_origin([700.0, 300.0], 9999.0, 30.0, LAPTOP)
     assert x == pytest.approx(LAPTOP.origin.x)
     assert LAPTOP.origin.y <= y
+
+
+# --- drawing (task 5) --------------------------------------------------------
+#
+# The panel itself still is not tested by pixel -- see the module docstring --
+# but a handful of things about *how* it draws are cheap to get backwards and
+# expensive to notice by eye, so they are pinned here instead.
+
+
+@darwin_only
+def test_the_view_is_flipped():
+    """panel.py returns top-left-origin rects, which is Pillow's convention.
+    A flipped NSView adopts it, so one set of rects serves both renderers.
+
+    Called on a real instance, not the unbound class method: `isFlipped` is a
+    genuine AppKit override point (unlike this file's other private helpers),
+    so pyobjc bridges it to a real Objective-C selector -- one that, correctly,
+    refuses to run with a bare `None` standing in for `self`.
+    """
+    view = flowbar_mac._PillView.alloc().init()
+    assert view.isFlipped() is True
+
+
+def test_panel_height_is_taken_from_the_frame_not_the_constant():
+    """The window must resize as it grows. Reading PILL_HEIGHT here is the
+    bug that would draw a full-width panel one pill tall."""
+    import inspect
+    source = inspect.getsource(flowbar_mac.FlowBar._resize)
+    assert "PILL_HEIGHT" not in source
+
+
+def test_the_bottom_edge_does_not_move_as_the_panel_grows():
+    """Gate 3c. The panel opens upward. If it grew about its centre it would
+    walk down over the Dock, and at the bottom-left/right positions it would
+    walk off the screen entirely.
+    """
+    visible = _a_visible_frame(width=1440.0, height=900.0)
+    bottoms = [
+        flowbar_mac.pill_origin("bottom-centre", width, visible)[1]
+        for width in (78.0, 200.0, 420.0)
+    ]
+    assert len(set(bottoms)) == 1
+
+
+def test_a_dragged_panel_also_grows_upward():
+    """Gate 3c again, for the dragged position -- `point_origin` takes its
+    anchor as (centre_x, bottom_y), which is what makes this free."""
+    visible = _a_visible_frame(width=1440.0, height=900.0)
+    point = (700.0, 120.0)
+    bottoms = [
+        flowbar_mac.point_origin(point, width, height, visible)[1]
+        for width, height in ((78.0, 30.0), (200.0, 55.0), (420.0, 96.0))
+    ]
+    assert len(set(bottoms)) == 1
+
+
+# --- hover and click-through (task 7) ----------------------------------------
+#
+# `_hover_for` and `_contains` are pure given `_last_layout`/`_last_origin`, so
+# they are tested here with no cursor, no screen and no run loop -- exactly as
+# `_tick` (which reads the real cursor) is not: see the module docstring's
+# testing note. `_tick` itself is hand-checked, same as the click-through and
+# focus guarantees it drives.
+
+
+def test_hover_is_empty_when_the_cursor_is_elsewhere():
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    bar._last_layout = None
+    assert bar._hover_for(0.0, 0.0) == ""
+
+
+def test_hover_names_the_item_under_the_cursor():
+    from vocal_advantage import panel
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),
+         panel.StripItem("cancel", "Cancel", "Esc")),
+    )
+    bar._last_origin = (100.0, 200.0)
+    item = bar._last_layout.items[1]
+    # Panel space -> screen space. The panel is flipped, so y counts down from
+    # the top edge, and the top edge is origin_y + height on a Mac.
+    x = 100.0 + item.hover_rect.x + item.hover_rect.w / 2.0
+    y = 200.0 + 96.0 - (item.hover_rect.y + item.hover_rect.h / 2.0)
+    assert bar._hover_for(x, y) == "cancel"
+
+
+def test_hover_is_empty_just_outside_the_panel():
+    from vocal_advantage import panel
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),),
+    )
+    bar._last_origin = (100.0, 200.0)
+    # Just above the top edge of the panel in screen space.
+    assert bar._hover_for(300.0, 200.0 + 96.0 + 1.0) == ""
+
+
+def test_contains_is_false_when_there_is_no_layout_yet():
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    bar._last_layout = None
+    assert bar._contains(0.0, 0.0) is False
+
+
+def test_contains_is_true_inside_the_last_drawn_rect_and_false_outside_it():
+    from vocal_advantage import panel
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    # A non-empty strip (so there is something to click) is what this test is
+    # about geometrically -- see the click-eating tests below for what happens
+    # when there is nothing in the strip to click.
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),),
+    )
+    bar._last_origin = (100.0, 200.0)
+    assert bar._contains(300.0, 240.0) is True
+    assert bar._contains(50.0, 240.0) is False
+
+
+# --- click-eating with nothing to click (final review issue 3) --------------
+#
+# `_contains` used to test only `placed.width`/`placed.height`, never whether
+# `placed.items` is non-empty. So the resting pill (which is never in
+# CONTROL_STATES) and the TRANSCRIBING panel (which is, by design, in
+# PANEL_STATES but not CONTROL_STATES -- see `flowbar.CONTROL_STATES`) both
+# stopped being click-through the instant the cursor crossed them, even
+# though `mouseDown_` would then find `hover == ""` and do nothing: a
+# swallowed click, including one meant for the Dock, which sits right under
+# the resting pill's position.
+#
+# The same expression also closes a related timing bug: `panel.layout` builds
+# `items` whenever `strip.h > 0`, but `panel.strip_alpha` (what
+# `_draw_strip` gates drawing on) does not go positive until `strip.h` is
+# most of the way to `STRIP_HEIGHT` -- so a part-grown strip's items used to
+# be clickable before they were visible. Gating on `panel.strip_alpha(...) >
+# 0` as well as `items` being non-empty makes "clickable" and "visible" the
+# same rule.
+
+
+def test_a_transcribing_panel_with_no_controls_does_not_swallow_clicks():
+    from vocal_advantage import panel
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    # TRANSCRIBING: the panel is fully open (so the strip band itself is at
+    # full height) but offers zero controls -- `flowbar.Indicator._strip`
+    # returns `()` outside `CONTROL_STATES`.
+    bar._last_layout = panel.layout(420.0, 96.0, 12.0, 1.0, "Transcribing", ())
+    bar._last_origin = (100.0, 200.0)
+    # Well inside the panel's bounding box.
+    assert bar._contains(300.0, 240.0) is False
+
+
+def test_the_resting_pill_does_not_swallow_clicks():
+    from vocal_advantage import panel
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    bar._last_layout = panel.layout(78.0, 30.0, 15.0, 0.0, "", ())
+    bar._last_origin = (100.0, 200.0)
+    assert bar._contains(120.0, 210.0) is False
+
+
+def test_a_recording_panels_stop_control_does_swallow_clicks():
+    from vocal_advantage import panel
+    bar = flowbar_mac.FlowBar.__new__(flowbar_mac.FlowBar)
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),
+         panel.StripItem("cancel", "Cancel", "Esc")),
+    )
+    bar._last_origin = (100.0, 200.0)
+    assert bar._contains(300.0, 240.0) is True
+
+
+def test_click_through_is_the_default():
+    """Gate 4a. The three guards in this file's docstring are why."""
+    import inspect
+    source = inspect.getsource(flowbar_mac.FlowBar)
+    assert "setIgnoresMouseEvents_(True)" in source
+
+
+# --- the move outline follows the panel's real radius (final review issue 4)
+#
+# `_draw_move_outline` used to compute its own radius as
+# `(height - MOVE_OUTLINE_WIDTH) / 2.0` -- full-round, correct back when the
+# bar was always a 30pt pill. At panel height (96pt) that is radius 47
+# against a panel whose real radius (`data.radius`) is 12, so the blue
+# move-mode outline sliced across the waveform band and cut the corners off
+# the strip. `NSBezierPath` and `NSColor` are swapped for fakes here: the
+# point is what radius gets asked for, not what gets painted, and this way
+# the test runs with no window and no graphics context.
+
+
+@darwin_only
+def test_move_outline_uses_the_panels_own_radius():
+    from unittest import mock
+
+    class _FakePath:
+        def setLineWidth_(self, width):
+            pass
+
+        def stroke(self):
+            pass
+
+    calls = []
+
+    class _FakeBezierPath:
+        @staticmethod
+        def bezierPathWithRoundedRect_xRadius_yRadius_(rect, x_radius, y_radius):
+            calls.append((x_radius, y_radius))
+            return _FakePath()
+
+    class _FakeColour:
+        def set(self):
+            pass
+
+    class _FakeNSColor:
+        @staticmethod
+        def colorWithCalibratedRed_green_blue_alpha_(r, g, b, a):
+            return _FakeColour()
+
+    view = flowbar_mac._PillView.alloc().init()
+    view._movable = True
+
+    with mock.patch.object(flowbar_mac, "NSBezierPath", _FakeBezierPath), \
+         mock.patch.object(flowbar_mac, "NSColor", _FakeNSColor):
+        view._draw_move_outline(420.0, 96.0, 12.0)  # panel size, panel.PANEL_RADIUS
+
+    assert calls, "no rounded rect was built"
+    x_radius, y_radius = calls[0]
+    inset = flowbar_mac.MOVE_OUTLINE_WIDTH / 2.0
+    assert x_radius == pytest.approx(12.0 - inset)
+    assert y_radius == pytest.approx(12.0 - inset)
+    # The old bug, pinned so it cannot come back quietly: full-round at panel
+    # height is 47, wildly off the panel's actual 12pt radius.
+    assert x_radius != pytest.approx((96.0 - flowbar_mac.MOVE_OUTLINE_WIDTH) / 2.0)
+
+
+# --- the shared peak-bar fraction (final review issue 5, gate 5a) -----------
+
+
+def test_the_bar_amplitude_comes_from_panels_shared_constant():
+    """`0.345` (half of `panel.PEAK_FRACTION`) used to be a bare float here,
+    duplicated verbatim -- comment included -- in flowbar_win.py. Exactly the
+    drift `panel.py` exists to prevent, on a value that determines a drawn
+    rect."""
+    import inspect
+    source = inspect.getsource(flowbar_mac._PillView._draw_bars)
+    assert "panel.PEAK_FRACTION" in source
+    assert "0.345" not in source
+
+
+# --- message text contrast (final review issue 1) ----------------------------
+#
+# `_draw_message` drew message text as an 8%-white ink -- correct against the
+# old warm-paper pill, and a 1.35:1 contrast against `panel.PILL_FILL_RGB`
+# (11, 11, 11), the near-black ground this branch introduced. Every flash()
+# call site, including controller.py's PASTE_FAILED_MESSAGE (the app's only
+# "your dictation did not land" channel), went through this and drew
+# invisibly.
+#
+# Rendered offscreen with `bitmapImageRepForCachingDisplayInRect_` +
+# `cacheDisplayInRect_toBitmapImageRep_`, not a hand-built NSGraphicsContext:
+# the latter skips the view's `isFlipped` transform, so it would not exercise
+# the real draw path this bug lives in.
+
+
+@darwin_only
+def test_message_text_is_legible_against_the_near_black_pill():
+    from vocal_advantage import flowbar, panel
+
+    width, height = 260.0, float(wf.PILL_HEIGHT)
+    view = flowbar_mac._PillView.alloc().initWithFrame_(
+        flowbar_mac.NSMakeRect(0, 0, width, height)
+    )
+    view.setData_(
+        flowbar.Frame(
+            state=flowbar.MESSAGE,
+            heights=wf.idle_heights(wf.BAR_COUNT),
+            text="could not paste - press Ctrl+V",
+            width=width,
+            pill_alpha=0.96,
+            bar_alpha=0.0,
+            text_alpha=1.0,
+            open=0.0,
+            height=height,
+            radius=panel.PILL_RADIUS,
+        )
+    )
+
+    rect = flowbar_mac.NSMakeRect(0, 0, width, height)
+    bitmap = view.bitmapImageRepForCachingDisplayInRect_(rect)
+    view.cacheDisplayInRect_toBitmapImageRep_(rect, bitmap)
+    pixels_wide, pixels_high = bitmap.pixelsWide(), bitmap.pixelsHigh()
+
+    def brightness(x, y):
+        colour = bitmap.colorAtX_y_(x, y)
+        return (
+            colour.redComponent() + colour.greenComponent() + colour.blueComponent()
+        ) / 3.0
+
+    mid_y = pixels_high // 2
+    # Left edge, mid-height: inside the pill body, clear of both the rounded
+    # corner cutout and the centred text -- the pill's own ground colour.
+    ground = brightness(20, mid_y)
+    # A band around vertical centre, where `_draw_message` centres the text,
+    # scanned across the width but staying clear of the rounded corners.
+    band_y = range(mid_y - 8, mid_y + 8)
+    band_x = range(30, pixels_wide - 30)
+    brightest = max(brightness(x, y) for x in band_x for y in band_y)
+
+    assert brightest > ground + 0.3, (
+        f"brightest text pixel ({brightest:.3f}) is not legible against the "
+        f"pill ground ({ground:.3f}) -- the flash() message would be invisible"
+    )

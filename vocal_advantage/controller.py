@@ -165,6 +165,10 @@ class DictationController:
         self._down_at = 0.0
         self._timings = Timings(clock=self._clock)
 
+        #: A control clicked on the Flow Bar, waiting for the next tick.
+        #: Written from the UI thread, read and cleared in `tick`.
+        self._requested: str | None = None
+
     # -- public API ---------------------------------------------------------
 
     def on_key_event(self, key_name: str, is_down: bool) -> None:
@@ -178,6 +182,21 @@ class DictationController:
             self._handle_down(key)
         else:
             self._handle_up(key)
+
+    def request_stop(self) -> None:
+        """Ask for the recording to be stopped and transcribed.
+
+        Recorded rather than performed. This is called from the UI thread when
+        the Flow Bar's Stop is clicked, and this object is already driven from
+        the hotkey thread and the tick thread -- performing it here would put a
+        third thread inside the state machine. `tick` does the work, which is
+        the pump every other transition already goes through.
+        """
+        self._requested = "stop"
+
+    def request_cancel(self) -> None:
+        """Ask for the recording to be discarded. See `request_stop`."""
+        self._requested = "cancel"
 
     def set_hotkey(self, hotkey: HotkeySpec) -> None:
         """Swap the hotkey without restarting the app.
@@ -207,6 +226,17 @@ class DictationController:
         promptly -- 0.1s in the real app. An un-earned tick costs one snapshot
         and a comparison.
         """
+        requested, self._requested = self._requested, None
+        if requested is not None and self.state is State.RECORDING:
+            # Ignored outside RECORDING on purpose: the strip hides its
+            # controls in every other state, but a click can still land in the
+            # frame between the state changing and the redraw, and a stray
+            # click must never bin a transcription in flight.
+            if requested == "cancel":
+                self._cancel()
+            else:
+                self._stop_and_process()
+
         if self.state is not State.RECORDING:
             return
 

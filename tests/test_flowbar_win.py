@@ -23,6 +23,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from vocal_advantage import flowbar
+from vocal_advantage import panel
 from vocal_advantage import waveform as wf
 from vocal_advantage.flowbar import Frame
 from vocal_advantage.flowbar_win import (
@@ -54,13 +56,13 @@ def a_frame(**overrides):
 # --- pill_origin ------------------------------------------------------------
 
 def test_bottom_centre_is_horizontally_centred():
-    x, _ = pill_origin("bottom-centre", 78, SCREEN_W, SCREEN_H)
+    x, _ = pill_origin("bottom-centre", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
     assert x + 78 / 2 == pytest.approx(SCREEN_W / 2, abs=1)
 
 
 def test_bottom_left_and_right_sit_a_margin_in():
-    left, _ = pill_origin("bottom-left", 78, SCREEN_W, SCREEN_H)
-    right, _ = pill_origin("bottom-right", 78, SCREEN_W, SCREEN_H)
+    left, _ = pill_origin("bottom-left", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
+    right, _ = pill_origin("bottom-right", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
     assert left == SIDE_MARGIN
     assert right + 78 == SCREEN_W - SIDE_MARGIN
 
@@ -68,28 +70,77 @@ def test_bottom_left_and_right_sit_a_margin_in():
 def test_y_is_measured_downward_from_the_top():
     # The macOS twin measures upward from the bottom. Getting this backwards
     # puts the pill off the top of the screen, and only on Windows.
-    _, y = pill_origin("bottom-centre", 78, SCREEN_W, SCREEN_H)
+    _, y = pill_origin("bottom-centre", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
     assert y == SCREEN_H - wf.SCREEN_MARGIN - wf.PILL_HEIGHT
     assert 0 < y < SCREEN_H
 
 
 def test_the_whole_pill_is_on_screen():
     for position in ("bottom-centre", "bottom-left", "bottom-right"):
-        x, y = pill_origin(position, 78, SCREEN_W, SCREEN_H)
+        x, y = pill_origin(position, 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
         assert 0 <= x and x + 78 <= SCREEN_W
         assert 0 <= y and y + wf.PILL_HEIGHT <= SCREEN_H
 
 
 def test_an_unknown_position_falls_back_to_centre():
-    unknown, _ = pill_origin("nowhere", 78, SCREEN_W, SCREEN_H)
-    centre, _ = pill_origin("bottom-centre", 78, SCREEN_W, SCREEN_H)
+    unknown, _ = pill_origin("nowhere", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
+    centre, _ = pill_origin("bottom-centre", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
     assert unknown == centre
 
 
 def test_a_widened_pill_stays_centred():
-    narrow, _ = pill_origin("bottom-centre", 78, SCREEN_W, SCREEN_H)
-    wide, _ = pill_origin("bottom-centre", 240, SCREEN_W, SCREEN_H)
+    narrow, _ = pill_origin("bottom-centre", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
+    wide, _ = pill_origin("bottom-centre", 240, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
     assert narrow + 78 / 2 == pytest.approx(wide + 240 / 2, abs=1)
+
+
+# --- the bottom edge must not move as the panel grows (gate 3c) -------------
+#
+# The panel opens upward from a stationary bottom edge. `pill_origin` used to
+# hardcode `wf.PILL_HEIGHT` regardless of the height it was actually asked
+# for, so the bottom edge (y + height) slid down by ~66pt as the panel grew
+# from the 30pt pill to the 96pt panel. Correct on macOS already, because
+# AppKit's y is up and the anchor there is the bottom edge directly; here y is
+# top-left and down, so the anchor is `screen_height - SCREEN_MARGIN` and the
+# top edge (`y`) must fall as `height` rises to keep the bottom edge fixed.
+
+
+def test_bottom_edge_is_identical_at_pill_height_and_panel_height():
+    """Gate 3c. `y + height` -- the bottom edge -- must be the same whether
+    the bar is the resting 30pt pill or the fully grown 96pt panel, for every
+    preset position."""
+    for position in ("bottom-centre", "bottom-left", "bottom-right"):
+        x_pill, y_pill = pill_origin(
+            position, 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H
+        )
+        x_panel, y_panel = pill_origin(
+            position, panel.PANEL_WIDTH, panel.PANEL_HEIGHT, SCREEN_W, SCREEN_H
+        )
+        assert y_pill + wf.PILL_HEIGHT == y_panel + panel.PANEL_HEIGHT, position
+
+
+def test_the_top_edge_rises_as_the_panel_grows():
+    """y must DECREASE as height grows -- the sign a first instinct gets
+    backwards in a top-left, y-down coordinate system."""
+    _, y_pill = pill_origin(
+        "bottom-centre", 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H
+    )
+    _, y_panel = pill_origin(
+        "bottom-centre", panel.PANEL_WIDTH, panel.PANEL_HEIGHT, SCREEN_W, SCREEN_H
+    )
+    assert y_panel < y_pill
+
+
+def test_bottom_edge_is_identical_for_a_dragged_point_too():
+    """Same invariant through `point_origin`, which already took a height --
+    this pins that it is genuinely the live frame height doing the work, not
+    a coincidence of the clamp."""
+    point = [400.0, 500.0]
+    x_pill, y_pill = point_origin(point, 78, wf.PILL_HEIGHT, SCREEN_W, SCREEN_H)
+    x_panel, y_panel = point_origin(
+        point, panel.PANEL_WIDTH, panel.PANEL_HEIGHT, SCREEN_W, SCREEN_H
+    )
+    assert y_pill + wf.PILL_HEIGHT == y_panel + panel.PANEL_HEIGHT == 500.0
 
 
 # --- render_frame -----------------------------------------------------------
@@ -126,13 +177,17 @@ def test_a_transparent_pill_really_is_transparent():
 
 
 def test_louder_bars_paint_more_ink():
+    """`panel.PILL_FILL_RGB` is near-black and `panel.BAR_RGB` is light --
+    inverted from the old cream pill's dark-on-light bars (the whole panel
+    redesign this task pulls in). "More ink" now means more *bright* pixels,
+    not more dark ones."""
     def ink(heights):
         image = render_frame(a_frame(heights=heights), 78, 30)
         return sum(
             1
             for x in range(78)
             for y in range(30)
-            if sum(image.getpixel((x, y))[:3]) < 200
+            if sum(image.getpixel((x, y))[:3]) > 400
             and image.getpixel((x, y))[3] > 128
         )
 
@@ -281,3 +336,253 @@ def test_y_for_a_dragged_point_is_measured_downward():
     _, near_top = point_origin([960.0, 100.0], 78, 30, 1920, 1080)
     _, near_bottom = point_origin([960.0, 1000.0], 78, 30, 1920, 1080)
     assert near_top < near_bottom
+
+
+# ---------------------------------------------------------------------------
+# The panel -- the same rects `panel.layout` gives the macOS renderer, drawn
+# with Pillow instead of AppKit.
+# ---------------------------------------------------------------------------
+
+
+def a_panel_frame(**kwargs):
+    defaults = dict(
+        state=flowbar.RECORDING,
+        heights=(0.5,) * wf.BUFFER_BARS,
+        text="", width=panel.PANEL_WIDTH, pill_alpha=1.0, bar_alpha=1.0,
+        text_alpha=0.0, open=1.0, height=panel.PANEL_HEIGHT,
+        radius=panel.PANEL_RADIUS,
+        strip=(
+            panel.StripItem("stop", "Stop", "F8"),
+            panel.StripItem("cancel", "Cancel", "Esc"),
+        ),
+        hover="",
+    )
+    defaults.update(kwargs)
+    return flowbar.Frame(**defaults)
+
+
+def test_the_panel_renders_at_its_full_size():
+    image = render_frame(a_panel_frame(), 420, 96)
+    assert image.size == (420, 96)
+
+
+def test_the_two_bands_are_different_colours():
+    """Gate 1a. The strip is charcoal; the band is near-black."""
+    image = render_frame(a_panel_frame(), 420, 96).convert("RGB")
+    band = image.getpixel((30, 20))
+    strip = image.getpixel((210, 80))
+    assert sum(strip) > sum(band) + 40
+
+
+def test_neither_band_is_flat():
+    """Gate 1b."""
+    image = render_frame(a_panel_frame(), 420, 96).convert("RGB")
+    assert image.getpixel((30, 4)) != image.getpixel((30, 50))
+    assert image.getpixel((210, 60)) != image.getpixel((210, 92))
+
+
+def test_the_panel_is_not_forced_symmetric():
+    """`_mirrored` exists for the pill and is wrong here: the panel's top and
+    bottom halves are different by design. Applying it would paint a mirrored
+    waveform band over the control strip."""
+    image = render_frame(a_panel_frame(), 420, 96).convert("RGB")
+    top = image.getpixel((210, 10))
+    bottom = image.getpixel((210, 86))
+    assert top != bottom
+
+
+def test_the_pill_is_still_forced_symmetric():
+    """And the pill still gets it, for the reason `_mirrored` documents."""
+    image = render_frame(a_frame(), 78, 30).convert("RGBA")
+    for y in range(6):
+        assert image.getpixel((39, y)) == image.getpixel((39, 29 - y))
+
+
+def test_the_panel_has_an_outer_border():
+    """Gate 1c. Lighter than either band, on all four edges -- actually
+    sampled on all four, not just the top."""
+    image = render_frame(a_panel_frame(), 420, 96).convert("RGB")
+    for edge_xy, inside_xy in (
+        ((210, 0), (210, 8)),      # top
+        ((210, 95), (210, 87)),    # bottom
+        ((0, 48), (8, 48)),        # left
+        ((419, 48), (411, 48)),    # right
+    ):
+        edge = image.getpixel(edge_xy)
+        inside = image.getpixel(inside_xy)
+        assert sum(edge) > sum(inside), f"{edge_xy} not lighter than {inside_xy}"
+
+
+def test_the_resting_pill_has_a_border_too():
+    """The border used to draw only inside `if frame.open > 0.001:`, so a
+    resting frame -- `Frame.open`'s default, and what every pre-existing pill
+    test exercises -- had no outline at all, while flowbar_mac strokes the
+    border unconditionally. Found by cross-platform pixel sampling."""
+    image = render_frame(a_frame(), 78, 30).convert("RGB")
+    edge = image.getpixel((39, 0))
+    inside = image.getpixel((39, 8))
+    assert sum(edge) > sum(inside)
+
+
+def test_the_tallest_bar_is_about_69_percent_of_the_band():
+    """Gate 1e. Measured off superwhisper, not chosen -- a full-height trace
+    reads as clipping and a short one reads as a dead microphone."""
+    image = render_frame(
+        a_panel_frame(heights=(1.0,) * wf.BUFFER_BARS), 420, 96
+    ).convert("RGB")
+    band_h = panel.BAND_HEIGHT
+    # Scanned across the whole band rather than down one column: the bars sit
+    # on a 4pt pitch, so a hard-coded x is one constant change away from
+    # landing in a gap and asserting about the background.
+    lit = [
+        y for y in range(int(band_h))
+        if any(image.getpixel((x, y))[0] > 120 for x in range(80, 340))
+    ]
+    assert lit, "no bars were drawn at all"
+    assert 0.60 < (max(lit) - min(lit) + 1) / band_h < 0.78
+
+
+def test_the_renderer_computes_no_layout_of_its_own():
+    """Gate 5a. Every rect comes from panel.py, or the platforms drift."""
+    import inspect
+    from vocal_advantage import flowbar_win
+    source = inspect.getsource(flowbar_win.render_frame)
+    assert "panel.layout(" in source
+    assert "STRIP_HEIGHT" not in source
+    assert "BAND_HEIGHT" not in source
+
+
+def test_the_bar_amplitude_comes_from_panels_shared_constant():
+    """Final review issue 5 (gate 5a). `0.345` (half of `panel.PEAK_FRACTION`)
+    used to be a bare float here, duplicated verbatim -- comment included --
+    in flowbar_mac.py. Exactly the drift `panel.py` exists to prevent, on a
+    value that determines a drawn rect."""
+    import inspect
+    source = inspect.getsource(render_frame)
+    assert "panel.PEAK_FRACTION" in source
+    assert "0.345" not in source
+
+
+def test_writes_a_png_to_look_at(tmp_path):
+    """The honest substitute for eyeballing this on Windows. Not an assertion
+    about beauty -- it is the fixture the spec's verification table names."""
+    out = tmp_path / "panel.png"
+    render_frame(a_panel_frame(), 420, 96).save(out)
+    assert out.stat().st_size > 0
+
+
+# --- hover and click-through (task 7) ----------------------------------------
+#
+# `_hover_for` and `_contains` only touch `panel`, not Win32, so -- like
+# `render_frame` above -- they are plain data and can be checked from a Mac.
+# The cursor poll and the WS_EX_TRANSPARENT toggle in `_draw` cannot: they are
+# unverified here, same as the rest of this file's window code.
+
+
+def test_hover_is_empty_when_the_cursor_is_elsewhere():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = None
+    assert bar._hover_for(0.0, 0.0) == ""
+
+
+def test_hover_names_the_item_under_the_cursor():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),
+         panel.StripItem("cancel", "Cancel", "Esc")),
+    )
+    bar._last_origin = (100.0, 200.0)
+    item = bar._last_layout.items[1]
+    # Windows screen space is already top-left origin, so this needs no flip --
+    # unlike the macOS twin of this test.
+    x = 100.0 + item.hover_rect.x + item.hover_rect.w / 2.0
+    y = 200.0 + item.hover_rect.y + item.hover_rect.h / 2.0
+    assert bar._hover_for(x, y) == "cancel"
+
+
+def test_hover_is_empty_just_outside_the_panel():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),),
+    )
+    bar._last_origin = (100.0, 200.0)
+    assert bar._hover_for(300.0, 199.0) == ""
+
+
+def test_contains_is_false_when_there_is_no_layout_yet():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = None
+    assert bar._contains(0.0, 0.0) is False
+
+
+def test_contains_is_true_inside_the_last_drawn_rect_and_false_outside_it():
+    bar = FlowBar.__new__(FlowBar)
+    # A non-empty strip (so there is something to click) is what this test is
+    # about geometrically -- see the click-eating tests below for what happens
+    # when there is nothing in the strip to click.
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),),
+    )
+    bar._last_origin = (100.0, 200.0)
+    assert bar._contains(300.0, 240.0) is True
+    assert bar._contains(50.0, 240.0) is False
+
+
+# --- click-eating with nothing to click (final review issue 3) --------------
+#
+# `_contains` used to test only `placed.width`/`placed.height`, never whether
+# `placed.items` is non-empty. So the resting pill (which is never in
+# CONTROL_STATES) and the TRANSCRIBING panel (which is, by design, in
+# PANEL_STATES but not CONTROL_STATES -- see `flowbar.CONTROL_STATES`) both
+# stopped being click-through the instant the cursor crossed them, even
+# though the window procedure would then find `hover == ""` and do nothing: a
+# swallowed click, including one meant for the taskbar, which sits right
+# under the resting pill's position.
+#
+# The same expression also closes a related timing bug: `panel.layout` builds
+# `items` whenever `strip.h > 0`, but `panel.strip_alpha` (what `_draw_strip`
+# gates drawing on) does not go positive until `strip.h` is most of the way
+# to `STRIP_HEIGHT` -- so a part-grown strip's items used to be clickable
+# before they were visible. Gating on `panel.strip_alpha(...) > 0` as well as
+# `items` being non-empty makes "clickable" and "visible" the same rule.
+
+
+def test_a_transcribing_panel_with_no_controls_does_not_swallow_clicks():
+    bar = FlowBar.__new__(FlowBar)
+    # TRANSCRIBING: the panel is fully open (so the strip band itself is at
+    # full height) but offers zero controls -- `flowbar.Indicator._strip`
+    # returns `()` outside `CONTROL_STATES`.
+    bar._last_layout = panel.layout(420.0, 96.0, 12.0, 1.0, "Transcribing", ())
+    bar._last_origin = (100.0, 200.0)
+    # Well inside the panel's bounding box.
+    assert bar._contains(300.0, 240.0) is False
+
+
+def test_the_resting_pill_does_not_swallow_clicks():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = panel.layout(78.0, 30.0, 15.0, 0.0, "", ())
+    bar._last_origin = (100.0, 200.0)
+    assert bar._contains(120.0, 210.0) is False
+
+
+def test_a_recording_panels_stop_control_does_swallow_clicks():
+    bar = FlowBar.__new__(FlowBar)
+    bar._last_layout = panel.layout(
+        420.0, 96.0, 12.0, 1.0, "Recording",
+        (panel.StripItem("stop", "Stop", "F8"),
+         panel.StripItem("cancel", "Cancel", "Esc")),
+    )
+    bar._last_origin = (100.0, 200.0)
+    assert bar._contains(300.0, 240.0) is True
+
+
+def test_click_through_is_the_default():
+    """The Windows twin of the macOS gate 4a guard: WS_EX_TRANSPARENT is set
+    the moment the window is created, before any cursor poll has run."""
+    import inspect
+    from vocal_advantage import flowbar_win
+    source = inspect.getsource(flowbar_win.FlowBar._create_window)
+    assert "WS_EX_TRANSPARENT" in source
