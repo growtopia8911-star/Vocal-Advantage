@@ -13,13 +13,23 @@ so this file collects and runs on Windows too.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
+from vocal_advantage import flowbar_mac
 from vocal_advantage import waveform as wf
 from vocal_advantage.flowbar_mac import (
     SIDE_MARGIN,
     pill_origin,
     point_origin,
+)
+
+#: Matches the pattern in test_tray_state.py: skips a case that needs a real
+#: NSObject instance rather than the plain-arithmetic functions everything
+#: else in this file exercises.
+darwin_only = pytest.mark.skipif(
+    sys.platform != "darwin", reason="AppKit, and the target is an NSObject"
 )
 
 
@@ -48,6 +58,16 @@ LAPTOP = FakeFrame(x=0.0, y=70.0, width=1512.0, height=912.0)
 #: A monitor to the right of the built-in display: origin.x is not zero, which
 #: is the case that silently puts the bar on the wrong screen.
 SECOND_MONITOR = FakeFrame(x=1512.0, y=0.0, width=2560.0, height=1440.0)
+
+
+def _a_visible_frame(width: float, height: float) -> FakeFrame:
+    """A fake `visibleFrame` sized like a real display, origin at zero.
+
+    A thin factory over `FakeFrame` rather than a second fake: the panel-growth
+    tests only care about screen size, not origin quirks -- those are already
+    covered above.
+    """
+    return FakeFrame(width=width, height=height)
 
 
 def test_bottom_centre_is_horizontally_centred():
@@ -171,3 +191,57 @@ def test_a_pill_wider_than_the_screen_still_lands_somewhere_sane():
     x, y = point_origin([700.0, 300.0], 9999.0, 30.0, LAPTOP)
     assert x == pytest.approx(LAPTOP.origin.x)
     assert LAPTOP.origin.y <= y
+
+
+# --- drawing (task 5) --------------------------------------------------------
+#
+# The panel itself still is not tested by pixel -- see the module docstring --
+# but a handful of things about *how* it draws are cheap to get backwards and
+# expensive to notice by eye, so they are pinned here instead.
+
+
+@darwin_only
+def test_the_view_is_flipped():
+    """panel.py returns top-left-origin rects, which is Pillow's convention.
+    A flipped NSView adopts it, so one set of rects serves both renderers.
+
+    Called on a real instance, not the unbound class method: `isFlipped` is a
+    genuine AppKit override point (unlike this file's other private helpers),
+    so pyobjc bridges it to a real Objective-C selector -- one that, correctly,
+    refuses to run with a bare `None` standing in for `self`.
+    """
+    view = flowbar_mac._PillView.alloc().init()
+    assert view.isFlipped() is True
+
+
+def test_panel_height_is_taken_from_the_frame_not_the_constant():
+    """The window must resize as it grows. Reading PILL_HEIGHT here is the
+    bug that would draw a full-width panel one pill tall."""
+    import inspect
+    source = inspect.getsource(flowbar_mac.FlowBar._resize)
+    assert "PILL_HEIGHT" not in source
+
+
+def test_the_bottom_edge_does_not_move_as_the_panel_grows():
+    """Gate 3c. The panel opens upward. If it grew about its centre it would
+    walk down over the Dock, and at the bottom-left/right positions it would
+    walk off the screen entirely.
+    """
+    visible = _a_visible_frame(width=1440.0, height=900.0)
+    bottoms = [
+        flowbar_mac.pill_origin("bottom-centre", width, visible)[1]
+        for width in (78.0, 200.0, 420.0)
+    ]
+    assert len(set(bottoms)) == 1
+
+
+def test_a_dragged_panel_also_grows_upward():
+    """Gate 3c again, for the dragged position -- `point_origin` takes its
+    anchor as (centre_x, bottom_y), which is what makes this free."""
+    visible = _a_visible_frame(width=1440.0, height=900.0)
+    point = (700.0, 120.0)
+    bottoms = [
+        flowbar_mac.point_origin(point, width, height, visible)[1]
+        for width, height in ((78.0, 30.0), (200.0, 55.0), (420.0, 96.0))
+    ]
+    assert len(set(bottoms)) == 1

@@ -23,6 +23,8 @@ are untouched -- they talk to ``flowbar.Indicator``, which is a queue.
 
 from __future__ import annotations
 
+from vocal_advantage import flowbar
+from vocal_advantage import panel
 from vocal_advantage import waveform as wf
 
 # Guarded exactly as hotkey_mac and paste_mac guard Quartz, and for the same
@@ -38,6 +40,8 @@ try:  # pragma: no cover - absence is only reachable off macOS
         NSFont,
         NSFontAttributeName,
         NSForegroundColorAttributeName,
+        NSGradient,
+        NSGraphicsContext,
         NSMutableParagraphStyle,
         NSPanel,
         NSParagraphStyleAttributeName,
@@ -52,6 +56,7 @@ except ImportError:  # pragma: no cover - not macOS
     objc = None
     NSApplication = NSBezierPath = NSColor = NSFont = None
     NSFontAttributeName = NSForegroundColorAttributeName = None
+    NSGradient = NSGraphicsContext = None
     NSMutableParagraphStyle = NSPanel = NSParagraphStyleAttributeName = None
     NSRunLoop = NSRunLoopCommonModes = NSScreen = NSTimer = None
     NSMakeRect = NSString = None
@@ -76,13 +81,11 @@ NSTextAlignmentLeft = 0
 NSTextAlignmentCenter = 2
 
 # --- palette ----------------------------------------------------------------
-#: A light ground with black bars on it, and NO outline. The edge of the fill is
-#: what defines the shape now, so the rounded ends come purely from the
-#: antialiased fill -- which is why the fill must never be drawn inset for a
-#: stroke that no longer exists, or the pill loses a pixel all the way round.
-#: Warm rather than pure white, so it reads as paper rather than a blown-out box.
-PILL_FILL_RGB = (0.97, 0.965, 0.945)
-BAR_RGB = (0.0, 0.0, 0.0)
+# The colours themselves live in `panel.py`, as 0-255 integer triples -- not
+# here. Keeping a second copy in float-0-1 AppKit form is the exact drift this
+# design exists to prevent: `PILL_FILL_RGB` used to disagree, silently, with
+# its Pillow counterpart. `_colour` below is what converts, once, on the way
+# in.
 
 #: Drawn only while "Move bar" is on. Not decoration: in that mode the pill
 #: stops being click-through and starts eating clicks, so it has to be
@@ -94,10 +97,6 @@ MOVE_OUTLINE_WIDTH = 2.0
 FPS = 60
 SIDE_MARGIN = 24        # from the screen edge, for the left/right positions
 MESSAGE_FONT_SIZE = 10.0
-#: Smaller than a message: a standing reminder, not an announcement.
-LEGEND_FONT_SIZE = 9.5
-#: From the pill's left edge. Comfortably inside the rounded end.
-LEGEND_PAD_X = 12.0
 
 POSITIONS = ("bottom-centre", "bottom-left", "bottom-right")
 
@@ -111,6 +110,30 @@ def ensure_app() -> NSApplication:
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     return app
+
+
+def _colour(rgb, alpha: float):
+    """A 0-255 triple from `panel` as an NSColor.
+
+    The conversion lives here rather than in `panel`, which must stay free of
+    AppKit. One representation, one place it is converted.
+    """
+    red, green, blue = rgb
+    return NSColor.colorWithCalibratedRed_green_blue_alpha_(
+        red / 255.0, green / 255.0, blue / 255.0, alpha
+    )
+
+
+def _vertical_gradient(rect, top_rgb, bottom_rgb, alpha: float) -> None:
+    """Fill `rect` with a vertical blend. Nothing in this panel is flat."""
+    NSGradient.alloc().initWithStartingColor_endingColor_(
+        _colour(top_rgb, alpha), _colour(bottom_rgb, alpha)
+    ).drawInRect_angle_(rect, 270.0)
+
+
+def _rect(r) -> "NSMakeRect":
+    """A `panel.Rect` as an NSRect. Safe because the view is flipped."""
+    return NSMakeRect(r.x, r.y, r.w, r.h)
 
 
 def point_origin(point, width: float, height: float, visible_frame):
@@ -154,15 +177,24 @@ def pill_origin(position: str, width: float, visible_frame):
     return x, y_min + wf.SCREEN_MARGIN
 
 
-class _FlowBarView(NSView):
+class _PillView(NSView):
     """Draws one `flowbar.Frame`. Holds no state of its own beyond that frame."""
 
     def initWithFrame_(self, rect):
-        self = objc.super(_FlowBarView, self).initWithFrame_(rect)
+        self = objc.super(_PillView, self).initWithFrame_(rect)
         if self is None:
             return None
         self._data = None
         return self
+
+    def isFlipped(self) -> bool:
+        """Top-left origin, y down -- matching `panel` and Pillow.
+
+        The bars are symmetric about the horizontal centre line, so this does
+        not change how they draw. It exists so the strip's rects can be used
+        exactly as `panel.layout` returns them.
+        """
+        return True
 
     def setData_(self, data) -> None:
         self._data = data
@@ -196,22 +228,48 @@ class _FlowBarView(NSView):
         bounds = self.bounds()
         width = bounds.size.width
         height = bounds.size.height
-        radius = height / 2.0     # fully rounded ends, not a rounded rectangle
+        placed = panel.layout(
+            width, height, data.radius,
+            flowbar.STATUS_TEXT.get(data.state, ""),
+            data.strip,
+        )
 
-        # Fill only, drawn on the full bounds. With the outline gone there is
-        # nothing to inset for, and insetting anyway would shrink the pill.
-        fill_red, fill_green, fill_blue = PILL_FILL_RGB
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(
-            fill_red, fill_green, fill_blue, data.pill_alpha
-        ).set()
-        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            NSMakeRect(0, 0, width, height), radius, radius
-        ).fill()
+        clip = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(0, 0, width, height), data.radius, data.radius
+        )
+        NSGraphicsContext.currentContext().saveGraphicsState()
+        clip.addClip()
+
+        # The pill's single fill fades out as the panel's two bands fade in, so
+        # the shape is never momentarily both and never momentarily neither.
+        if data.open < 0.999:
+            _colour(panel.PILL_FILL_RGB, data.pill_alpha * (1.0 - data.open)).set()
+            NSBezierPath.bezierPathWithRect_(
+                NSMakeRect(0, 0, width, height)
+            ).fill()
+        if data.open > 0.001:
+            band_alpha = data.pill_alpha * data.open
+            _vertical_gradient(
+                _rect(placed.band), panel.BAND_TOP_RGB,
+                panel.BAND_BOTTOM_RGB, band_alpha,
+            )
+            _vertical_gradient(
+                _rect(placed.strip), panel.STRIP_TOP_RGB,
+                panel.STRIP_BOTTOM_RGB, band_alpha,
+            )
+            _colour(panel.HAIRLINE_RGB, band_alpha).set()
+            NSBezierPath.bezierPathWithRect_(_rect(placed.hairline)).fill()
+
+        NSGraphicsContext.currentContext().restoreGraphicsState()
+
+        _colour(panel.BORDER_RGB, data.pill_alpha).set()
+        clip.setLineWidth_(1.0)
+        clip.stroke()
 
         if data.bar_alpha > 0.01:
-            self._draw_bars(data, width, height)
-        if data.legend and data.bar_alpha > 0.01:
-            self._draw_legend(data, width, height)
+            self._draw_bars(data, placed)
+        if data.open > 0.01:
+            self._draw_strip(data, placed)
         if data.text and data.text_alpha > 0.01:
             self._draw_message(data, width, height)
         if getattr(self, "_movable", False):
@@ -233,61 +291,95 @@ class _FlowBarView(NSView):
         outline.setLineWidth_(MOVE_OUTLINE_WIDTH)
         outline.stroke()
 
-    def _draw_bars(self, data, width: float, height: float) -> None:
-        centre_y = height / 2.0
-        max_half = height / 2.0 - wf.BAR_MARGIN_Y
-        # With a legend the trace keeps its resting width and moves to the
-        # right-hand end, so the text gets the space the pill grew by and the
-        # bars stay exactly the size they are at rest. Laying them out across
-        # the whole widened pill instead would stretch the trace every time a
-        # recording started, which reads as the waveform changing shape.
-        bars_width = float(wf.PILL_WIDTH) if data.legend else width
-        offset = width - bars_width
-        xs = [x + offset for x in wf.bar_layout(bars_width, len(data.heights))]
+    def _draw_bars(self, data, placed) -> None:
+        band = placed.band
+        if band.h <= 0.0:
+            return
+        centre_y = band.y + band.h / 2.0
+        # 69% of band height at peak, mirrored -- so the tallest bar's half is
+        # 0.345 of the band. Measured off superwhisper, not chosen.
+        max_half = band.h * 0.345
 
-        bar_red, bar_green, bar_blue = BAR_RGB
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(
-            bar_red, bar_green, bar_blue, data.bar_alpha
-        ).set()
-        for x, normalised in zip(xs, data.heights):
-            # Mirrored about the centre line: each bar grows up and down by the
-            # same amount. A bar chart would run from the bottom edge instead,
-            # and would look completely wrong.
+        _colour(panel.BAR_RGB, data.bar_alpha).set()
+        for x, normalised in zip(
+            wf.bar_layout(band.w, len(data.heights)), data.heights
+        ):
             half = normalised * max_half
-            # Never shorter than it is wide, so the round caps stay circular
-            # instead of squashing into an ellipse at rest.
             total = max(wf.BAR_WIDTH, half * 2.0)
-            bar = NSMakeRect(
-                x - wf.BAR_WIDTH / 2.0, centre_y - total / 2.0,
-                wf.BAR_WIDTH, total,
-            )
             NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                bar, wf.BAR_WIDTH / 2.0, wf.BAR_WIDTH / 2.0
+                NSMakeRect(
+                    band.x + x - wf.BAR_WIDTH / 2.0, centre_y - total / 2.0,
+                    wf.BAR_WIDTH, total,
+                ),
+                wf.BAR_WIDTH / 2.0, wf.BAR_WIDTH / 2.0,
             ).fill()
 
-    def _draw_legend(self, data, width: float, height: float) -> None:
-        """The hotkey reminder, left-aligned in the space the pill grew by.
+    def _draw_strip(self, data, placed) -> None:
+        """The dot, the state word, and each control beside its own key cap.
 
-        Grey rather than black: it is a standing reminder sitting next to the
-        thing you are actually watching, and at full ink it would compete with
-        the trace. Alpha rides `bar_alpha` so it fades in with the bars instead
-        of needing a channel of its own.
+        Alpha rides `open` throughout, so the strip fades in as the panel
+        widens rather than drawing squashed into a part-grown one.
         """
+        alpha = data.open
+        if placed.dot is not None:
+            dot_rgb = panel.DOT_RECORDING_RGB
+            if data.state == flowbar.TRANSCRIBING:
+                dot_rgb = panel.DOT_TRANSCRIBING_RGB
+            _colour(dot_rgb, alpha).set()
+            NSBezierPath.bezierPathWithOvalInRect_(_rect(placed.dot)).fill()
+
+        if placed.state_rect is not None and placed.state_label:
+            self._draw_text(
+                placed.state_label, placed.state_rect,
+                panel.LABEL_FONT_SIZE, panel.TEXT_RGB, alpha,
+            )
+
+        for item in placed.items:
+            if item.id == data.hover:
+                _colour(panel.HOVER_FILL_RGB, alpha).set()
+                radius = item.hover_rect.h / 2.0
+                NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                    _rect(item.hover_rect), radius, radius
+                ).fill()
+            self._draw_text(
+                item.label, item.label_rect,
+                panel.LABEL_FONT_SIZE, panel.TEXT_RGB, alpha,
+            )
+            if item.cap_rect is not None:
+                _colour(panel.CAP_FILL_RGB, alpha).set()
+                NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                    _rect(item.cap_rect), panel.CAP_RADIUS, panel.CAP_RADIUS
+                ).fill()
+                self._draw_text(
+                    item.cap, item.cap_rect,
+                    panel.CAP_FONT_SIZE, panel.TEXT_RGB, alpha,
+                    centred=True,
+                )
+
+        if placed.divider is not None:
+            _colour(panel.HAIRLINE_RGB, alpha).set()
+            NSBezierPath.bezierPathWithRect_(_rect(placed.divider)).fill()
+
+    def _draw_text(self, string, rect, size, rgb, alpha, centred=False) -> None:
         style = NSMutableParagraphStyle.alloc().init()
-        style.setAlignment_(NSTextAlignmentLeft)
+        style.setAlignment_(
+            NSTextAlignmentCenter if centred else NSTextAlignmentLeft
+        )
+        red, green, blue = rgb
         attributes = {
-            NSFontAttributeName: NSFont.systemFontOfSize_(LEGEND_FONT_SIZE),
+            NSFontAttributeName: NSFont.systemFontOfSize_(size),
             NSForegroundColorAttributeName:
-                NSColor.colorWithCalibratedWhite_alpha_(0.34, data.bar_alpha),
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                    red / 255.0, green / 255.0, blue / 255.0, alpha
+                ),
             NSParagraphStyleAttributeName: style,
         }
-        text = NSString.stringWithString_(data.legend)
-        size = text.sizeWithAttributes_(attributes)
-        available = max(0.0, width - float(wf.PILL_WIDTH) - LEGEND_PAD_X)
-        text.drawInRect_withAttributes_(
+        text = NSString.stringWithString_(string)
+        measured = text.sizeWithAttributes_(attributes)
+        NSString.stringWithString_(string).drawInRect_withAttributes_(
             NSMakeRect(
-                LEGEND_PAD_X, (height - size.height) / 2.0,
-                available, size.height,
+                rect.x, rect.y + (rect.h - measured.height) / 2.0,
+                max(rect.w, measured.width), measured.height,
             ),
             attributes,
         )
@@ -368,7 +460,7 @@ class FlowBar:
             | NSWindowCollectionBehaviorIgnoresCycle
         )
 
-        self._view = _FlowBarView.alloc().initWithFrame_(
+        self._view = _PillView.alloc().initWithFrame_(
             NSMakeRect(0, 0, self._width, height)
         )
         self._panel.setContentView_(self._view)
@@ -390,7 +482,7 @@ class FlowBar:
     def _tick(self) -> None:
         frame = self._indicator.next_frame()
         if abs(frame.width - self._width) > 0.5:
-            self._resize(frame.width)
+            self._resize(frame.width, frame.height)
         self._view.setData_(frame)
         self._view.setNeedsDisplay_(True)
 
@@ -401,13 +493,13 @@ class FlowBar:
             return point_origin(self._point, width, height, visible)
         return pill_origin(self._position, width, visible)
 
-    def _resize(self, width: float) -> None:
-        """Re-anchor as the pill widens for a message, so it does not drift."""
+    def _resize(self, width: float, height: float) -> None:
+        """Re-anchor as the panel grows, so its bottom edge does not drift."""
         self._width = width
-        height = float(wf.PILL_HEIGHT)
-        x, y = self._origin(width, height)
-        self._panel.setFrame_display_(NSMakeRect(x, y, width, height), False)
-        self._view.setFrame_(NSMakeRect(0, 0, width, height))
+        origin = self._origin(width, height)
+        self._panel.setFrame_display_(
+            NSMakeRect(origin[0], origin[1], width, height), True
+        )
 
     # --- "Move bar" -------------------------------------------------------
 
