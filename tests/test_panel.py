@@ -8,6 +8,7 @@ instead of twice, by eye, on two operating systems.
 import pytest
 
 from vocal_advantage import panel
+from vocal_advantage import waveform as wf
 
 
 # --- geometry ---------------------------------------------------------------
@@ -24,7 +25,7 @@ def test_the_three_horizontal_pieces_fill_the_height_exactly():
 
 
 def test_bands_stack_without_gap_or_overlap():
-    band, hairline, strip = panel.bands(420.0, 96.0)
+    band, hairline, strip = panel.bands(420.0, 96.0, 1.0)
     assert band.y == 0.0
     assert hairline.y == band.y + band.h
     assert strip.y == hairline.y + hairline.h
@@ -32,18 +33,58 @@ def test_bands_stack_without_gap_or_overlap():
 
 
 def test_bands_span_the_full_width():
-    for rect in panel.bands(420.0, 96.0):
+    for rect in panel.bands(420.0, 96.0, 1.0):
         assert rect.x == 0.0
         assert rect.w == 420.0
 
 
 def test_bands_scale_with_a_shrunken_panel():
     """Mid-animation the panel is neither pill nor panel, and the strip must
-    still sit on the bottom edge rather than floating."""
-    band, hairline, strip = panel.bands(200.0, 60.0)
+    still sit on the bottom edge rather than floating.
+
+    The strip and hairline are no longer fixed heights: they scale with
+    `open_` just as the band does, so a half-open panel gets a half-height
+    strip -- not a full-height one squeezing an already-small band, which is
+    the bug this replaces (see test_the_band_is_never_starved_mid_grow).
+    """
+    band, hairline, strip = panel.bands(200.0, 60.0, 0.5)
     assert strip.y + strip.h == 60.0
     assert band.y == 0.0
     assert band.h + hairline.h + strip.h == 60.0
+    assert strip.h == pytest.approx(panel.STRIP_HEIGHT * 0.5)
+    assert hairline.h == pytest.approx(panel.HAIRLINE * 0.5)
+
+
+def test_a_resting_pill_is_all_waveform():
+    """Gate 1a. open_=0 is the pill, and the pill has never shown anything
+    but its waveform -- so the band must claim the whole height and the
+    strip and hairline must vanish, not draw at some ghost fixed size behind
+    a band that never gets to include their space.
+
+    This is the exact defect a rendered offscreen capture caught and no test
+    did: with the old fixed-height strip, a 30pt resting pill had 30 - 38 - 1
+    left for its band, clamped to 0.0, and `_draw_bars` returns early on
+    `band.h <= 0` -- so the pill drew as an empty black lozenge.
+    """
+    band, hairline, strip = panel.bands(78.0, 30.0, 0.0)
+    assert band.h == 30.0
+    assert hairline.h == 0.0
+    assert strip.h == 0.0
+
+
+def test_the_band_is_never_starved_mid_grow():
+    """`open_` and `height` do not vary independently in the real app --
+    `flowbar.Frame.height` is `lerp(PILL_HEIGHT, PANEL_HEIGHT, open_)` -- so
+    this samples that actual relationship rather than an arbitrary pair.
+    A fixed-height strip and hairline would eat into a still-small band
+    before the panel had grown enough to afford them; this is the assertion
+    whose absence let that ship.
+    """
+    for tenths in range(0, 11):
+        open_ = tenths / 10.0
+        height = panel.lerp(float(wf.PILL_HEIGHT), panel.PANEL_HEIGHT, open_)
+        band, _, _ = panel.bands(420.0, height, open_)
+        assert band.h > 0.0
 
 
 # --- palette ----------------------------------------------------------------
@@ -139,13 +180,13 @@ def test_bar_count_is_clamped_outside_zero_to_one():
 
 # --- strip layout -----------------------------------------------------------
 
-def a_layout(width=420.0, height=96.0, items=None, state="Recording"):
+def a_layout(width=420.0, height=96.0, items=None, state="Recording", open_=1.0):
     if items is None:
         items = (
             panel.StripItem("stop", "Stop", "F8"),
             panel.StripItem("cancel", "Cancel", "Esc"),
         )
-    return panel.layout(width, height, panel.PANEL_RADIUS, state, items)
+    return panel.layout(width, height, panel.PANEL_RADIUS, open_, state, items)
 
 
 def test_dot_and_state_word_sit_at_the_left():

@@ -107,15 +107,25 @@ def lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
 
 
-def bands(width: float, height: float) -> tuple[Rect, Rect, Rect]:
+def bands(width: float, height: float, open_: float) -> tuple[Rect, Rect, Rect]:
     """The waveform band, the hairline, and the control strip.
 
-    The strip and hairline keep their fixed heights and the band absorbs the
-    remainder, so a part-grown panel still has its strip sitting on the bottom
-    edge instead of floating in the middle of the animation.
+    The strip and hairline scale with `open_` rather than holding a fixed
+    height. The panel grows up from a 30pt pill that is *all* waveform --
+    fixed-height bands starved that pill of a band entirely (0pt of it left
+    once a 38pt strip and a 1pt hairline were subtracted from a 30pt height),
+    which drew the resting pill as an empty lozenge, and it held the strip at
+    full height from the first frame of every grow, when the design calls for
+    the strip to fade in as the panel opens rather than arrive pre-built.
+
+    `open_` is clamped to 0..1. At 0 the band takes the whole height and the
+    strip and hairline vanish -- the pill is nothing but its waveform. At 1
+    this reproduces the fixed 57/1/38 split exactly, so a fully open panel is
+    unchanged from before this fix.
     """
-    strip_h = min(STRIP_HEIGHT, max(0.0, height - HAIRLINE))
-    hairline_h = min(HAIRLINE, max(0.0, height - strip_h))
+    t = 0.0 if open_ < 0.0 else 1.0 if open_ > 1.0 else open_
+    strip_h = STRIP_HEIGHT * t
+    hairline_h = HAIRLINE * t
     band_h = max(0.0, height - strip_h - hairline_h)
     return (
         Rect(0.0, 0.0, width, band_h),
@@ -222,11 +232,19 @@ def layout(
     width: float,
     height: float,
     radius: float,
+    open_: float,
     state_label: str,
     items: tuple[StripItem, ...] = (),
 ) -> Layout:
-    """Everything a renderer needs to draw one panel, and nothing else."""
-    band, hairline, strip = bands(width, height)
+    """Everything a renderer needs to draw one panel, and nothing else.
+
+    `open_` is threaded straight through to `bands`, which is what makes the
+    band hold the whole panel at rest instead of losing its fixed-height
+    strip and hairline off the top of a 30pt pill. Grouped with `width`,
+    `height` and `radius` because, like them, it describes the outer shape
+    rather than the strip's contents.
+    """
+    band, hairline, strip = bands(width, height, open_)
 
     dot = None
     state_rect = None

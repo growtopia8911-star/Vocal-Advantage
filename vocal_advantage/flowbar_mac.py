@@ -229,7 +229,7 @@ class _PillView(NSView):
         width = bounds.size.width
         height = bounds.size.height
         placed = panel.layout(
-            width, height, data.radius,
+            width, height, data.radius, data.open,
             flowbar.STATUS_TEXT.get(data.state, ""),
             data.strip,
         )
