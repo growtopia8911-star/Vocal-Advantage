@@ -109,15 +109,17 @@ HOVER_FILL_RGB = (58, 59, 59)
 DOT_RECORDING_RGB = (255, 69, 58)
 DOT_TRANSCRIBING_RGB = (50, 121, 192)
 
-#: The pill's own ring. Much lighter than `BORDER_RGB`, which was measured off
-#: superwhisper's large dark panel where a dim edge was enough. On a small
-#: black lozenge the ring is most of what gives the shape its definition --
-#: it is the thing Kevin picked out of Wispr Flow's pill by name -- so it is
-#: a real light grey rather than a slightly-lifted black.
+#: The pill's own ring, and it is switched off: `PILL_BORDER_WIDTH` is 0, so
+#: neither renderer strokes anything. Removed 2026-08-25 on sight -- the
+#: light grey read as a hard outline rather than the soft edge it looked like
+#: at Wispr Flow's size.
+#:
+#: Kept rather than deleted because the trade is real and reversible in one
+#: number: with no ring, a near-black pill has nothing separating it from a
+#: near-black window behind it. The shape is now defined entirely by its own
+#: fill against whatever it sits on.
 PILL_BORDER_RGB = (168, 168, 168)
-#: Wider than a hairline for the same reason: at 26pt tall a 1pt ring reads
-#: as an artefact of antialiasing rather than as a drawn edge.
-PILL_BORDER_WIDTH = 1.5
+PILL_BORDER_WIDTH = 0.0
 
 
 # --- the compact recording indicator ----------------------------------------

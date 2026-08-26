@@ -276,9 +276,10 @@ class _PillView(NSView):
 
         NSGraphicsContext.currentContext().restoreGraphicsState()
 
-        _colour(panel.PILL_BORDER_RGB, data.pill_alpha).set()
-        clip.setLineWidth_(panel.PILL_BORDER_WIDTH)
-        clip.stroke()
+        if panel.PILL_BORDER_WIDTH > 0.0:
+            _colour(panel.PILL_BORDER_RGB, data.pill_alpha).set()
+            clip.setLineWidth_(panel.PILL_BORDER_WIDTH)
+            clip.stroke()
 
         if data.dot is not None:
             self._draw_dot(data, width, height)

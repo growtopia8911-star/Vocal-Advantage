@@ -342,11 +342,12 @@ def render_frame(frame, width: int, height: int) -> Image.Image:
     # to 0.0 and every resting-pill frame lives at or near it. Uses `alpha`
     # (pill_alpha), not `band_alpha`: the border's own opacity, not the
     # gradient bands' faded-in one.
-    draw.rounded_rectangle(
-        (0, 0, width * scale - 1, height * scale - 1),
-        radius=radius, outline=panel.PILL_BORDER_RGB + (alpha,),
-        width=max(1, int(panel.PILL_BORDER_WIDTH * scale)),
-    )
+    if panel.PILL_BORDER_WIDTH > 0.0:
+        draw.rounded_rectangle(
+            (0, 0, width * scale - 1, height * scale - 1),
+            radius=radius, outline=panel.PILL_BORDER_RGB + (alpha,),
+            width=max(1, int(panel.PILL_BORDER_WIDTH * scale)),
+        )
 
     if frame.dot is not None:
         # The state dot on the compact indicator. Rides `alpha` (pill_alpha),
