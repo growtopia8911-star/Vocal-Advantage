@@ -111,3 +111,134 @@ def test_lerp_hits_both_ends_exactly():
 
 def test_lerp_is_linear_in_the_middle():
     assert panel.lerp(0.0, 10.0, 0.25) == 2.5
+
+
+# --- bar count across the grow ---------------------------------------------
+
+def test_bar_count_at_rest_is_the_pill_count():
+    from vocal_advantage import waveform as wf
+    assert panel.bars_for_open(0.0) == wf.BAR_COUNT
+
+
+def test_bar_count_when_open_is_the_whole_buffer():
+    from vocal_advantage import waveform as wf
+    assert panel.bars_for_open(1.0) == wf.BUFFER_BARS
+
+
+def test_bar_count_grows_monotonically():
+    """The grow reveals history. It must never take bars away mid-animation."""
+    counts = [panel.bars_for_open(i / 40.0) for i in range(41)]
+    assert counts == sorted(counts)
+
+
+def test_bar_count_is_clamped_outside_zero_to_one():
+    from vocal_advantage import waveform as wf
+    assert panel.bars_for_open(-0.5) == wf.BAR_COUNT
+    assert panel.bars_for_open(1.5) == wf.BUFFER_BARS
+
+
+# --- strip layout -----------------------------------------------------------
+
+def a_layout(width=420.0, height=96.0, items=None, state="Recording"):
+    if items is None:
+        items = (
+            panel.StripItem("stop", "Stop", "F8"),
+            panel.StripItem("cancel", "Cancel", "Esc"),
+        )
+    return panel.layout(width, height, panel.PANEL_RADIUS, state, items)
+
+
+def test_dot_and_state_word_sit_at_the_left():
+    placed = a_layout()
+    assert placed.dot.x == pytest.approx(panel.STRIP_PAD_X)
+    assert placed.state_rect.x > placed.dot.right
+
+
+def test_dot_is_vertically_centred_in_the_strip():
+    placed = a_layout()
+    strip = placed.strip
+    centre = strip.y + strip.h / 2.0
+    assert placed.dot.y + placed.dot.h / 2.0 == pytest.approx(centre)
+
+
+def test_items_are_ordered_left_to_right_as_given():
+    placed = a_layout()
+    assert [item.id for item in placed.items] == ["stop", "cancel"]
+    assert placed.items[0].hover_rect.right <= placed.items[1].hover_rect.x
+
+
+def test_the_right_group_is_flush_right():
+    placed = a_layout()
+    last = placed.items[-1]
+    assert last.hover_rect.right == pytest.approx(
+        420.0 - panel.STRIP_PAD_X
+    )
+
+
+def test_a_divider_sits_between_the_two_items():
+    placed = a_layout()
+    assert placed.divider is not None
+    assert placed.items[0].hover_rect.right <= placed.divider.x
+    assert placed.divider.right <= placed.items[1].hover_rect.x
+
+
+def test_each_item_puts_its_cap_after_its_label():
+    """Gate 2b: label beside its own key cap, at nearly equal weight."""
+    for item in a_layout().items:
+        assert item.cap_rect is not None
+        assert item.label_rect.right <= item.cap_rect.x
+
+
+def test_an_item_without_a_cap_gets_no_cap_rect():
+    placed = a_layout(items=(panel.StripItem("mode", "Voice", ""),))
+    assert placed.items[0].cap_rect is None
+
+
+def test_no_items_means_no_divider():
+    """TRANSCRIBING. Gate 2d."""
+    placed = a_layout(items=(), state="Transcribing")
+    assert placed.items == ()
+    assert placed.divider is None
+    assert placed.state_rect is not None
+
+
+def test_a_wider_panel_moves_the_right_group_but_not_the_left():
+    narrow = a_layout(width=420.0)
+    wide = a_layout(width=520.0)
+    assert narrow.dot.x == wide.dot.x
+    assert wide.items[-1].hover_rect.right > narrow.items[-1].hover_rect.right
+
+
+# --- hit testing ------------------------------------------------------------
+
+def test_hit_test_finds_an_item_under_its_own_centre():
+    placed = a_layout()
+    for item in placed.items:
+        x = item.hover_rect.x + item.hover_rect.w / 2.0
+        y = item.hover_rect.y + item.hover_rect.h / 2.0
+        assert panel.hit_test(placed, x, y) == item.id
+
+
+def test_hit_test_misses_the_waveform_band():
+    placed = a_layout()
+    assert panel.hit_test(placed, 210.0, 20.0) is None
+
+
+def test_hit_test_misses_the_gap_between_the_groups():
+    placed = a_layout()
+    gap_x = (placed.state_rect.right + placed.items[0].hover_rect.x) / 2.0
+    y = placed.strip.y + placed.strip.h / 2.0
+    assert panel.hit_test(placed, gap_x, y) is None
+
+
+def test_hit_test_misses_outside_the_panel():
+    placed = a_layout()
+    assert panel.hit_test(placed, -5.0, 50.0) is None
+    assert panel.hit_test(placed, 500.0, 50.0) is None
+    assert panel.hit_test(placed, 210.0, 200.0) is None
+
+
+def test_hover_rects_do_not_overlap():
+    """Two items claiming the same pixel is how a hover flickers."""
+    a, b = a_layout().items
+    assert a.hover_rect.right <= b.hover_rect.x

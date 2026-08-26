@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from vocal_advantage import waveform as wf
+
 
 @dataclass(frozen=True)
 class Rect:
@@ -120,3 +122,216 @@ def bands(width: float, height: float) -> tuple[Rect, Rect, Rect]:
         Rect(0.0, band_h, width, hairline_h),
         Rect(0.0, band_h + hairline_h, width, strip_h),
     )
+
+
+# --- strip metrics ----------------------------------------------------------
+#: From each end of the strip. Comfortably inside the panel's corner radius.
+STRIP_PAD_X = 14.0
+DOT_DIAMETER = 8.0
+#: Between the dot and the state word.
+DOT_GAP = 8.0
+
+LABEL_FONT_SIZE = 13.0
+CAP_FONT_SIZE = 11.0
+CAP_RADIUS = 6.0
+CAP_HEIGHT = 20.0
+#: Left and right of a key cap's text, inside the chip.
+CAP_PAD_X = 6.0
+#: Between a label and its own cap. Small: they are one control.
+ITEM_GAP = 6.0
+#: Around the divider, between the two controls.
+GROUP_GAP = 10.0
+DIVIDER_WIDTH = 1.0
+DIVIDER_HEIGHT = 14.0
+#: Padding around a label+cap pair, which is what the hover pill fills.
+HOVER_PAD_X = 8.0
+HOVER_HEIGHT = 26.0
+
+#: Rough advance width per character, in points. This module cannot measure
+#: text -- it has no font and no drawing context, which is the whole point of
+#: it -- so the widths are estimated, exactly as MESSAGE_CHAR_WIDTH already is.
+#:
+#: **Deliberately over-estimates.** `flowbar.LEGEND_CHAR_WIDTH` learned this
+#: the expensive way: an under-estimate silently clipped "F8 stops - esc
+#: cancels" to "F8 stops -" at the pill's edge, because a renderer cannot widen
+#: anything at draw time. A few points of slack shows as a slightly wider gap,
+#: which nobody can see.
+LABEL_CHAR_WIDTH = 7.6
+CAP_CHAR_WIDTH = 7.0
+
+
+@dataclass(frozen=True)
+class StripItem:
+    """One control in the strip: a label beside its own keyboard shortcut.
+
+    `cap` may be empty, for an item that is not bound to a key.
+    """
+
+    id: str
+    label: str
+    cap: str
+
+
+@dataclass(frozen=True)
+class Placed:
+    """A StripItem with its rects worked out."""
+
+    id: str
+    #: What the hover pill fills, and what hit_test matches against. Wraps the
+    #: label and the cap together, because they are one control.
+    hover_rect: Rect
+    label: str
+    label_rect: Rect
+    cap: str
+    cap_rect: Rect | None
+
+
+@dataclass(frozen=True)
+class Layout:
+    width: float
+    height: float
+    radius: float
+    band: Rect
+    hairline: Rect
+    strip: Rect
+    dot: Rect | None
+    state_label: str
+    state_rect: Rect | None
+    items: tuple[Placed, ...]
+    divider: Rect | None
+
+
+def bars_for_open(open_: float) -> int:
+    """How many of the buffer's newest bars to draw at this openness.
+
+    Interpolated rather than switched, so the trace gains bars smoothly as the
+    panel widens instead of jumping from 15 to 69 in one frame. Because
+    `bar_layout` centres its bars as a group, a linear count also produces
+    linearly growing side margins -- 10pt in the pill, 73pt in the panel --
+    without either number being written down anywhere.
+    """
+    t = 0.0 if open_ < 0.0 else 1.0 if open_ > 1.0 else open_
+    return int(round(lerp(wf.BAR_COUNT, wf.BUFFER_BARS, t)))
+
+
+def _label_width(text: str, char_width: float) -> float:
+    return len(text) * char_width
+
+
+def layout(
+    width: float,
+    height: float,
+    radius: float,
+    state_label: str,
+    items: tuple[StripItem, ...] = (),
+) -> Layout:
+    """Everything a renderer needs to draw one panel, and nothing else."""
+    band, hairline, strip = bands(width, height)
+
+    dot = None
+    state_rect = None
+    placed: list[Placed] = []
+    divider = None
+
+    if strip.h > 0.0:
+        centre_y = strip.y + strip.h / 2.0
+
+        dot = Rect(
+            STRIP_PAD_X,
+            centre_y - DOT_DIAMETER / 2.0,
+            DOT_DIAMETER,
+            DOT_DIAMETER,
+        )
+        state_w = _label_width(state_label, LABEL_CHAR_WIDTH)
+        state_rect = Rect(
+            dot.right + DOT_GAP,
+            centre_y - LABEL_FONT_SIZE / 2.0,
+            state_w,
+            LABEL_FONT_SIZE,
+        )
+
+        # The right group is laid out right-to-left from the far edge, so the
+        # gap between the two groups absorbs every difference in width. Laying
+        # it out left-to-right would make the panel's right margin depend on
+        # how long the hotkey's name happens to be.
+        cursor = width - STRIP_PAD_X
+        for index, item in enumerate(reversed(items)):
+            label_w = _label_width(item.label, LABEL_CHAR_WIDTH)
+            cap_w = (
+                _label_width(item.cap, CAP_CHAR_WIDTH) + 2.0 * CAP_PAD_X
+                if item.cap
+                else 0.0
+            )
+            inner = label_w + (ITEM_GAP + cap_w if item.cap else 0.0)
+            hover_w = inner + 2.0 * HOVER_PAD_X
+            hover_rect = Rect(
+                cursor - hover_w,
+                centre_y - HOVER_HEIGHT / 2.0,
+                hover_w,
+                HOVER_HEIGHT,
+            )
+            label_rect = Rect(
+                hover_rect.x + HOVER_PAD_X,
+                centre_y - LABEL_FONT_SIZE / 2.0,
+                label_w,
+                LABEL_FONT_SIZE,
+            )
+            cap_rect = (
+                Rect(
+                    label_rect.right + ITEM_GAP,
+                    centre_y - CAP_HEIGHT / 2.0,
+                    cap_w,
+                    CAP_HEIGHT,
+                )
+                if item.cap
+                else None
+            )
+            placed.append(
+                Placed(
+                    id=item.id,
+                    hover_rect=hover_rect,
+                    label=item.label,
+                    label_rect=label_rect,
+                    cap=item.cap,
+                    cap_rect=cap_rect,
+                )
+            )
+            cursor = hover_rect.x
+            if index < len(items) - 1:
+                cursor -= GROUP_GAP
+                divider = Rect(
+                    cursor - DIVIDER_WIDTH,
+                    centre_y - DIVIDER_HEIGHT / 2.0,
+                    DIVIDER_WIDTH,
+                    DIVIDER_HEIGHT,
+                )
+                cursor -= DIVIDER_WIDTH + GROUP_GAP
+
+        placed.reverse()
+
+    return Layout(
+        width=width,
+        height=height,
+        radius=radius,
+        band=band,
+        hairline=hairline,
+        strip=strip,
+        dot=dot,
+        state_label=state_label,
+        state_rect=state_rect,
+        items=tuple(placed),
+        divider=divider,
+    )
+
+
+def hit_test(placed_layout: Layout, x: float, y: float) -> str | None:
+    """Which strip item is at (x, y), if any. Panel-space coordinates.
+
+    Only the items are hit-testable. The band, the dot and the state word are
+    not controls today; when gate 6 makes the profile name a button it becomes
+    an item like any other and needs no change here.
+    """
+    for item in placed_layout.items:
+        if item.hover_rect.contains(x, y):
+            return item.id
+    return None
