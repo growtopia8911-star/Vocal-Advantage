@@ -44,6 +44,11 @@ POST_PASTE_S = 0.06
 #: paste the *old* clipboard into the document, which is far worse than the
 #: clipboard being briefly wrong.
 CLIPBOARD_RESTORE_S = 0.25
+#: How often to ask the focused element whether the text has arrived, and how
+#: long to keep asking. 10ms is well under the cost of the AX call it replaces;
+#: 300ms is generous -- a paste that has not landed by then is not going to.
+CONFIRM_POLL_S = 0.01
+CONFIRM_TIMEOUT_S = 0.30
 
 
 class PasteBackend(Protocol):
@@ -162,6 +167,46 @@ _pending_saved: str | None = None
 _restore_pending = False
 
 
+def snapshot_safely(confirm) -> object | None:
+    """The confirmer's reading of the focused element, or None. Never raises.
+
+    None means "cannot tell", and the caller then behaves exactly as it did
+    before confirmation existed. Accessibility is an optimisation; it must
+    never be the reason a dictation fails.
+    """
+    if confirm is None:
+        return None
+    try:
+        return confirm.snapshot()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def wait_until_pasted(backend, confirm, before) -> bool | None:
+    """Poll the focused element until the text lands. None if we cannot tell.
+
+    Returns True the moment the element changes size, False if it never does
+    within CONFIRM_TIMEOUT_S, and None when there is nothing to observe -- no
+    confirmer, no baseline reading, or an Accessibility call that failed.
+
+    That three-way answer is the point. True and False are both *knowledge*;
+    None is the absence of it, and only None may fall back to sleeping and
+    assuming success. Collapsing None into False would report every Electron
+    app's paste as a failure.
+    """
+    if confirm is None or before is None:
+        return None
+    deadline = backend.monotonic() + CONFIRM_TIMEOUT_S
+    while backend.monotonic() < deadline:
+        backend.sleep(CONFIRM_POLL_S)
+        try:
+            if confirm.changed(before):
+                return True
+        except Exception:  # noqa: BLE001 - lost the element mid-paste
+            return None
+    return False
+
+
 def _spawn(work) -> None:
     """Run the restore on a daemon thread, so the dictation does not wait.
 
@@ -201,6 +246,7 @@ def paste_with(
     chord: Iterable[tuple[int, bool]],
     *,
     schedule=_spawn,
+    confirm=None,
 ) -> bool:
     """Put text on the clipboard, paste it, and put the clipboard back.
 
@@ -225,6 +271,9 @@ def paste_with(
     wrote_clipboard = False
     try:
         wait_for_modifier_release(backend)
+        # Before anything is written: this is the baseline the paste is
+        # measured against, so it has to predate our own clipboard write.
+        before = snapshot_safely(confirm)
         # Read before writing, or there is nothing left to read (10c). Outside
         # the lock: this is an OS call and the lock guards two variables.
         current = read_clipboard(backend)
@@ -241,10 +290,18 @@ def paste_with(
         wrote_clipboard = True
         backend.sleep(CLIPBOARD_SETTLE_S)
         pasted = send_chord(backend, chord)
-        # Keep the guard up a little longer so the hotkey hook sees and drops
-        # our own injected key events before it starts listening again.
-        backend.sleep(POST_PASTE_S)
-        return pasted
+
+        landed = wait_until_pasted(backend, confirm, before)
+        if landed is None:
+            # Nothing to observe -- the app publishes no text, or this is
+            # Windows. Keep the guard up a little longer so the hotkey hook
+            # sees and drops our own injected key events before it starts
+            # listening again, and assume the paste worked, as before.
+            backend.sleep(POST_PASTE_S)
+            return pasted
+        # We watched it happen, or watched it not happen. Either way the
+        # injected events are long delivered by now.
+        return pasted and landed
     finally:
         if wrote_clipboard:
             # Off the critical path: the dictation is done, and the wait for

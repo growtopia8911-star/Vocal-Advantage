@@ -433,15 +433,14 @@ class Indicator:
             bar_alpha=self._bar_alpha,
             text_alpha=self._text_alpha,
             open=self._open,
-            height=panel.lerp(
-                float(wf.PILL_HEIGHT), panel.PANEL_HEIGHT, self._open
-            ),
-            radius=panel.lerp(
-                panel.PILL_RADIUS, panel.PANEL_RADIUS, self._open
-            ),
+            # One height and one radius in every state: the bar is a fixed
+            # lozenge now, and the only thing that ever changes is how wide a
+            # flash message makes it.
+            height=panel.COMPACT_HEIGHT,
+            radius=panel.COMPACT_HEIGHT / 2.0,
             strip=self._strip(),
             hover=hover,
-            dot=DOT_RGB.get(self._mode),
+            dot=None,
             visible=self._visible(),
         )
 

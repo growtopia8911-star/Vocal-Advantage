@@ -377,7 +377,7 @@ def test_the_indicator_is_full_size_on_the_first_frame():
     indicator.show_recording()
     frame = indicator.next_frame()
     assert (frame.width, frame.height) == (
-        panel.COMPACT_WIDTH, float(wf.PILL_HEIGHT),
+        panel.COMPACT_WIDTH, panel.COMPACT_HEIGHT,
     )
 
 
@@ -389,7 +389,7 @@ def test_no_frame_is_ever_an_intermediate_size_while_recording():
     for _ in range(120):
         frame = indicator.next_frame()
         assert (frame.width, frame.height) == (
-            panel.COMPACT_WIDTH, float(wf.PILL_HEIGHT),
+            panel.COMPACT_WIDTH, panel.COMPACT_HEIGHT,
         )
 
 
@@ -399,7 +399,7 @@ def test_transcribing_stays_visible_and_full_size():
     frame = indicator.next_frame()
     assert frame.visible is True
     assert (frame.width, frame.height) == (
-        panel.COMPACT_WIDTH, float(wf.PILL_HEIGHT),
+        panel.COMPACT_WIDTH, panel.COMPACT_HEIGHT,
     )
 
 
@@ -409,7 +409,7 @@ def test_a_flash_message_is_visible_and_pill_shaped_and_opens_no_panel():
     frame = indicator.next_frame()
     assert frame.visible is True
     assert frame.open == 0.0
-    assert frame.height == float(wf.PILL_HEIGHT)
+    assert frame.height == panel.COMPACT_HEIGHT
 
 
 def test_leaving_the_active_shape_snaps_but_still_fades_before_hiding():
@@ -424,7 +424,7 @@ def test_leaving_the_active_shape_snaps_but_still_fades_before_hiding():
         indicator.next_frame()
     indicator.hide()
     frame = indicator.next_frame()
-    assert (frame.width, frame.height) == (float(wf.PILL_WIDTH), float(wf.PILL_HEIGHT))
+    assert (frame.width, frame.height) == (float(wf.PILL_WIDTH), panel.COMPACT_HEIGHT)
     assert frame.visible is True
     assert drain(indicator, 200).visible is False
 

@@ -39,8 +39,8 @@ def test_idle_rests_as_the_pill():
     frame = settle(an_indicator())
     assert frame.open == pytest.approx(0.0, abs=1e-3)
     assert frame.width == pytest.approx(wf.PILL_WIDTH, abs=0.5)
-    assert frame.height == pytest.approx(wf.PILL_HEIGHT, abs=0.5)
-    assert frame.radius == pytest.approx(panel.PILL_RADIUS, abs=0.1)
+    assert frame.height == pytest.approx(panel.COMPACT_HEIGHT, abs=0.5)
+    assert frame.radius == pytest.approx(panel.COMPACT_HEIGHT / 2.0, abs=0.1)
 
 
 
@@ -129,7 +129,7 @@ def test_recording_shows_the_compact_indicator():
     indicator.show_recording()
     frame = settle(indicator)
     assert frame.width == panel.COMPACT_WIDTH
-    assert frame.height == float(wf.PILL_HEIGHT)
+    assert frame.height == panel.COMPACT_HEIGHT
     assert frame.visible is True
 
 
@@ -139,18 +139,19 @@ def test_the_compact_indicator_is_full_size_on_the_first_frame():
     assert indicator.next_frame().width == panel.COMPACT_WIDTH
 
 
-def test_recording_and_transcribing_differ_only_by_the_dot():
-    """The strip's labels are gone, so colour is what tells them apart."""
+def test_recording_and_transcribing_are_the_same_shape():
+    """The dot went with the shrink -- Wispr Flow's pill has none and there
+    is no room at 26pt. The trace's behaviour (live vs sweep) and the tray
+    icon carry the state now."""
     rec, tra = an_indicator(), an_indicator()
     rec.show_recording()
     tra.show_processing()
     a, b = settle(rec), settle(tra)
     assert (a.width, a.height) == (b.width, b.height)
-    assert a.dot == panel.DOT_RECORDING_RGB
-    assert b.dot == panel.DOT_TRANSCRIBING_RGB
+    assert a.dot is None and b.dot is None
 
 
-def test_idle_and_message_have_no_dot():
+def test_nothing_draws_a_dot_any_more():
     """A dot that never changes is decoration, so it is only drawn when it
     is reporting something."""
     idle = an_indicator()

@@ -434,8 +434,12 @@ def test_the_tallest_bar_is_about_69_percent_of_the_band():
     # Scanned across the whole band rather than down one column: the bars sit
     # on a 4pt pitch, so a hard-coded x is one constant change away from
     # landing in a gap and asserting about the background.
+    # Skips the first rows: the pill's ring is a light grey (168) and 1.5pt
+    # wide as of the compact redesign, so it clears this brightness threshold
+    # and would be counted as a bar at y=0.
+    edge = int(round(panel.PILL_BORDER_WIDTH)) + 2
     lit = [
-        y for y in range(int(band_h))
+        y for y in range(edge, int(band_h))
         if any(image.getpixel((x, y))[0] > 120 for x in range(80, 340))
     ]
     assert lit, "no bars were drawn at all"

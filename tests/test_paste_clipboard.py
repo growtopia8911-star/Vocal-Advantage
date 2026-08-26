@@ -283,3 +283,125 @@ def test_the_default_scheduler_does_not_block_the_caller():
     before = threading.active_count()
     paste_with("dictated", b, CHORD)
     assert threading.active_count() >= before
+
+
+# --- confirming the paste actually landed -----------------------------------
+#
+# On macOS CGEventPost reports nothing, so a paste into a window that refuses
+# synthetic input is indistinguishable from one that worked. Reading the focused
+# element's size before and after is the only way to tell -- and it also means
+# not sleeping a fixed time hoping, because the moment the count moves we know.
+#
+# Where the app publishes nothing (Electron, commonly), the confirmer answers
+# None and the sequence falls back to exactly the old fixed wait.
+
+
+class FakeConfirmer:
+    """Stands in for ax_text.FocusedText."""
+
+    def __init__(self, before=10, after=None, polls_until_change=1):
+        self._before = before
+        self._after = after if after is not None else (before or 0) + 5
+        self._polls = polls_until_change
+        self.snapshots = 0
+        self.changed_calls = 0
+
+    def snapshot(self):
+        self.snapshots += 1
+        return self._before
+
+    def changed(self, before):
+        self.changed_calls += 1
+        if before is None or self._polls is None:
+            return False
+        return self.changed_calls >= self._polls
+
+
+def test_a_confirmed_paste_reports_success():
+    b = FakeBackend()
+    c = FakeConfirmer()
+    assert paste_with("dictated", b, CHORD, confirm=c, schedule=lambda fn: None) is True
+
+
+def test_a_confirmed_paste_does_not_pay_the_full_fixed_wait():
+    """The saving: stop as soon as the text appears."""
+    b = FakeBackend()
+    fast = FakeConfirmer(polls_until_change=1)
+    paste_with("dictated", b, CHORD, confirm=fast, schedule=lambda fn: None)
+    quick = b.slept
+
+    b2 = FakeBackend()
+    paste_with("dictated", b2, CHORD, schedule=lambda fn: None)
+    assert quick < b2.slept, "confirmation should finish sooner than the fixed wait"
+
+
+def test_an_unconfirmable_app_falls_back_to_the_old_behaviour():
+    """Electron apps publish nothing. That must cost nothing, not break."""
+    b = FakeBackend()
+    blind = FakeConfirmer(before=None)
+    assert paste_with("dictated", b, CHORD, confirm=blind,
+                      schedule=lambda fn: None) is True
+    assert b.slept == pytest.approx(0.22, abs=0.001), "should be the fixed path"
+
+
+def test_a_paste_that_never_lands_is_reported_as_failure():
+    """The gap this closes: today a refused paste looks exactly like success."""
+    b = FakeBackend()
+    never = FakeConfirmer(polls_until_change=None)
+    assert paste_with("dictated", b, CHORD, confirm=never,
+                      schedule=lambda fn: None) is False
+
+
+def test_a_paste_that_never_lands_gives_up_rather_than_hanging():
+    b = FakeBackend()
+    never = FakeConfirmer(polls_until_change=None)
+    paste_with("dictated", b, CHORD, confirm=never, schedule=lambda fn: None)
+    assert b.slept < 1.0, "must not wait forever for a paste that will not land"
+
+
+def test_the_snapshot_is_taken_before_the_clipboard_is_written():
+    """Reading after the paste would compare against the wrong baseline."""
+    class Ordered(FakeConfirmer):
+        def __init__(self, log):
+            super().__init__()
+            self._log = log
+
+        def snapshot(self):
+            self._log.append("snapshot")
+            return super().snapshot()
+
+    order: list = []
+    b = FakeBackend()
+
+    class Logging(FakeBackend):
+        def set_clipboard(self, text):
+            order.append("set")
+            super().set_clipboard(text)
+
+    lb = Logging()
+    paste_with("dictated", lb, CHORD, confirm=Ordered(order),
+               schedule=lambda fn: None)
+    assert order.index("snapshot") < order.index("set")
+
+
+def test_a_confirmer_that_explodes_falls_back_rather_than_failing():
+    """Accessibility is an optimisation. It must never cost a dictation."""
+    class Exploding:
+        def snapshot(self):
+            raise RuntimeError("accessibility server went away")
+
+        def changed(self, before):
+            raise RuntimeError("still gone")
+
+    b = FakeBackend()
+    assert paste_with("dictated", b, CHORD, confirm=Exploding(),
+                      schedule=lambda fn: None) is True
+
+
+def test_confirmation_still_restores_the_clipboard():
+    b = FakeBackend()
+    pending = []
+    paste_with("dictated", b, CHORD, confirm=FakeConfirmer(), schedule=pending.append)
+    assert len(pending) == 1
+    pending[0]()
+    assert b.clipboard == "previous contents"

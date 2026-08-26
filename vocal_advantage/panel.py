@@ -109,6 +109,16 @@ HOVER_FILL_RGB = (58, 59, 59)
 DOT_RECORDING_RGB = (255, 69, 58)
 DOT_TRANSCRIBING_RGB = (50, 121, 192)
 
+#: The pill's own ring. Much lighter than `BORDER_RGB`, which was measured off
+#: superwhisper's large dark panel where a dim edge was enough. On a small
+#: black lozenge the ring is most of what gives the shape its definition --
+#: it is the thing Kevin picked out of Wispr Flow's pill by name -- so it is
+#: a real light grey rather than a slightly-lifted black.
+PILL_BORDER_RGB = (168, 168, 168)
+#: Wider than a hairline for the same reason: at 26pt tall a 1pt ring reads
+#: as an artefact of antialiasing rather than as a drawn edge.
+PILL_BORDER_WIDTH = 1.5
+
 
 # --- the compact recording indicator ----------------------------------------
 # Replaces the 420x96 two-band panel, 2026-08-25, at the user's request after
@@ -120,17 +130,20 @@ DOT_TRANSCRIBING_RGB = (50, 121, 192)
 # from the researched app. There is no room for them at 30pt tall. The keys
 # themselves are unaffected -- the hotkey still stops and Esc still cancels --
 # so what is lost is the on-screen reminder, not the ability.
-COMPACT_WIDTH = 180.0
+COMPACT_WIDTH = 110.0
+#: Fully round, so height/2 is the radius. 26 rather than the old pill's 30:
+#: Wispr Flow's is smaller than either, and small is the whole request.
+COMPACT_HEIGHT = 26.0
 #: From each end. The ends are fully round, so this must clear the cap's curve.
-COMPACT_PAD_X = 12.0
+COMPACT_PAD_X = 10.0
 COMPACT_DOT_DIAMETER = 7.0
 #: Between the dot and the first bar, so the trace does not crowd the state.
 COMPACT_DOT_GAP = 9.0
 #: How many bars the compact trace holds. Sized to fill the space left of
 #: the dot rather than inherited from the resting pill's 15, which centred
 #: a short trace in a wide gap and read as a rendering fault.
-#: 35 bars at a 4pt pitch is 138pt of content in the 140pt trace.
-COMPACT_BARS = 35
+#: 21 bars at a 4pt pitch is 82pt of content in the 90pt trace.
+COMPACT_BARS = 21
 
 
 def compact_dot(width: float, height: float) -> Rect:
@@ -154,8 +167,10 @@ def compact_trace(width: float, height: float) -> Rect:
     out inside it without either of them working out the left edge itself --
     the same reason every other rect in this module exists.
     """
-    left = COMPACT_PAD_X + COMPACT_DOT_DIAMETER + COMPACT_DOT_GAP
-    return Rect(left, 0.0, max(0.0, width - left - COMPACT_PAD_X), height)
+    return Rect(
+        COMPACT_PAD_X, 0.0,
+        max(0.0, width - 2.0 * COMPACT_PAD_X), height,
+    )
 
 
 def lerp(a: float, b: float, t: float) -> float:

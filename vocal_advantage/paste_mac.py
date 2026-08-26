@@ -242,6 +242,24 @@ class MacBackend:
         return 1
 
 
+def _confirmer():
+    """Something that can tell whether the paste landed, or None.
+
+    macOS gives no delivery confirmation for injected keystrokes -- see
+    ``MacBackend.send_key`` -- so a paste into a window that refuses synthetic
+    input is indistinguishable from one that worked. Reading the focused
+    element's size before and after is the only way to know, and it also ends
+    the wait the moment the text appears instead of after a fixed delay.
+
+    None whenever Accessibility cannot answer, which is a normal state, not a
+    failure: many Electron apps publish no focused text element at all. The
+    paste sequence then behaves exactly as it did before this existed.
+    """
+    from vocal_advantage import ax_text
+
+    return ax_text.FocusedText() if ax_text.available() else None
+
+
 _DEFAULT_BACKEND: PasteBackend | None = None
 
 
@@ -268,7 +286,7 @@ def paste_text(text: str, *, backend: PasteBackend | None = None) -> bool:
     """
     if backend is None:
         backend = _default_backend()
-    return paste_with(text, backend, CMD_V_SEQUENCE)
+    return paste_with(text, backend, CMD_V_SEQUENCE, confirm=_confirmer())
 
 
 #: The former name for the clipboard route, from when typing was the default.

@@ -344,8 +344,8 @@ def render_frame(frame, width: int, height: int) -> Image.Image:
     # gradient bands' faded-in one.
     draw.rounded_rectangle(
         (0, 0, width * scale - 1, height * scale - 1),
-        radius=radius, outline=panel.BORDER_RGB + (alpha,),
-        width=max(1, int(scale)),
+        radius=radius, outline=panel.PILL_BORDER_RGB + (alpha,),
+        width=max(1, int(panel.PILL_BORDER_WIDTH * scale)),
     )
 
     if frame.dot is not None:
