@@ -35,8 +35,10 @@ import threading
 import time
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
+from vocal_advantage import flowbar
+from vocal_advantage import panel
 from vocal_advantage import waveform as wf
 from vocal_advantage.console import warn
 
@@ -80,10 +82,6 @@ FPS = 60
 SIDE_MARGIN = 24
 MESSAGE_FONT_SIZE = 11
 
-#: Matches flowbar_mac's palette exactly. If these two ever drift the pill will
-#: look like a different app on the other machine.
-PILL_FILL_RGB = (247, 246, 241)
-BAR_RGB = (0, 0, 0)
 #: Rendered at this multiple and scaled down: Pillow has no antialiasing, and
 #: the whole reason for this file is that the corners should not be jagged.
 SUPERSAMPLE = 4
@@ -246,35 +244,103 @@ def point_origin(point, width: float, height: float, screen_width: int,
     return int(round(x)), int(round(y))
 
 
+def _gradient(draw, rect, top_rgb, bottom_rgb, alpha, scale):
+    """A vertical blend, drawn a row at a time.
+
+    Pillow has no gradient primitive. One horizontal line per pixel row is
+    crude and exactly good enough: the bands are under 60pt tall and this
+    renders once per frame into a supersampled buffer.
+    """
+    height = max(1.0, rect.h * scale)
+    for step in range(int(height)):
+        t = step / height
+        colour = tuple(
+            int(round(top_rgb[i] + (bottom_rgb[i] - top_rgb[i]) * t))
+            for i in range(3)
+        )
+        y = rect.y * scale + step
+        draw.rectangle(
+            (rect.x * scale, y, (rect.x + rect.w) * scale - 1, y),
+            fill=colour + (alpha,),
+        )
+
+
 def render_frame(frame, width: int, height: int) -> Image.Image:
     """One `flowbar.Frame` as an RGBA image. Pure: no Win32, no window.
 
     Kept importable and callable on any platform on purpose -- it is the half of
     this file that can be looked at from the Mac, by saving the result to a PNG.
+
+    Every rect this draws comes from `panel.layout`, exactly as
+    `flowbar_mac._PillView.drawRect_` does -- neither renderer computes a rect
+    of its own, which is the whole reason `panel.py` exists.
     """
     scale = SUPERSAMPLE
     image = Image.new("RGBA", (width * scale, height * scale), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
     alpha = int(round(_clamp01(frame.pill_alpha) * 255))
-    radius = height * scale / 2.0      # fully rounded ends
-
-    # Fill only, no outline, on the full bounds -- matching flowbar_mac. The
-    # edge of the fill is what defines the shape now.
-    draw.rounded_rectangle(
-        (0, 0, width * scale - 1, height * scale - 1),
-        radius=radius,
-        fill=PILL_FILL_RGB + (alpha,),
+    placed = panel.layout(
+        float(width), float(height), frame.radius, frame.open,
+        flowbar.STATUS_TEXT.get(frame.state, ""), frame.strip,
     )
+    radius = frame.radius * scale
+
+    # The pill's single fill fades out as the panel's two bands fade in, so
+    # the shape is never momentarily both and never momentarily neither --
+    # matching flowbar_mac's drawRect_ exactly.
+    if frame.open < 0.999:
+        draw.rounded_rectangle(
+            (0, 0, width * scale - 1, height * scale - 1),
+            radius=radius,
+            fill=panel.PILL_FILL_RGB
+            + (int(round(alpha * (1.0 - frame.open))),),
+        )
+    if frame.open > 0.001:
+        band_alpha = int(round(alpha * frame.open))
+        _gradient(draw, placed.band, panel.BAND_TOP_RGB,
+                  panel.BAND_BOTTOM_RGB, band_alpha, scale)
+        _gradient(draw, placed.strip, panel.STRIP_TOP_RGB,
+                  panel.STRIP_BOTTOM_RGB, band_alpha, scale)
+        draw.rectangle(
+            (placed.hairline.x * scale, placed.hairline.y * scale,
+             placed.hairline.right * scale - 1,
+             placed.hairline.bottom * scale - 1),
+            fill=panel.HAIRLINE_RGB + (band_alpha,),
+        )
+        # Clip the square-cornered gradients back to the rounded shape by
+        # punching the corners out with a rounded-rectangle mask. AppKit gets
+        # this for free from a clip on the graphics context; Pillow has no
+        # such thing, so the mask does the same job after the fact.
+        mask = Image.new("L", image.size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, width * scale - 1, height * scale - 1),
+            radius=radius, fill=255,
+        )
+        image.putalpha(
+            Image.composite(image.getchannel("A"),
+                            Image.new("L", image.size, 0), mask)
+        )
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle(
+            (0, 0, width * scale - 1, height * scale - 1),
+            radius=radius, outline=panel.BORDER_RGB + (alpha,),
+            width=max(1, int(scale)),
+        )
 
     bar_alpha = int(round(_clamp01(frame.bar_alpha) * 255))
-    if bar_alpha > 2:
-        centre_y = height * scale / 2.0
-        max_half = (height / 2.0 - wf.BAR_MARGIN_Y) * scale
+    if bar_alpha > 2 and placed.band.h > 0:
+        centre_y = (placed.band.y + placed.band.h / 2.0) * scale
+        # 69% of band height at peak, mirrored -- so the tallest bar's half is
+        # 0.345 of the band. Measured off superwhisper, not chosen. Taken from
+        # `placed.band`, not the raw pill height, so the resting pill (whose
+        # band *is* the whole pill -- see `panel.bands`) and the open panel
+        # use the identical rule.
+        max_half = placed.band.h * 0.345 * scale
         bar_width = wf.BAR_WIDTH * scale
         for x, normalised in zip(
-            wf.bar_layout(width * scale, len(frame.heights), bar_width,
-                          wf.BAR_GAP * scale),
+            wf.bar_layout(placed.band.w * scale, len(frame.heights),
+                          bar_width, wf.BAR_GAP * scale),
             frame.heights,
         ):
             half = normalised * max_half
@@ -282,13 +348,96 @@ def render_frame(frame, width: int, height: int) -> Image.Image:
             # rather than squashing into ellipses at rest.
             total = max(bar_width, half * 2.0)
             draw.rounded_rectangle(
-                (x - bar_width / 2.0, centre_y - total / 2.0,
-                 x + bar_width / 2.0, centre_y + total / 2.0),
+                (placed.band.x * scale + x - bar_width / 2.0,
+                 centre_y - total / 2.0,
+                 placed.band.x * scale + x + bar_width / 2.0,
+                 centre_y + total / 2.0),
                 radius=bar_width / 2.0,
-                fill=BAR_RGB + (bar_alpha,),
+                fill=panel.BAR_RGB + (bar_alpha,),
             )
 
-    return _mirrored(image).resize((width, height), Image.LANCZOS)
+    # Same test `_draw_strip` uses internally to decide whether to draw at
+    # all, so this guard and the one inside it cannot disagree about whether
+    # the strip is visible this frame -- mirroring flowbar_mac's drawRect_.
+    if panel.strip_alpha(placed.strip.h) > 0.0:
+        _draw_strip(draw, placed, frame, scale)
+
+    # `_mirrored` forces symmetry about the horizontal centre line, which is
+    # right for a pill and actively wrong for a panel: the two bands differ by
+    # design, and mirroring would paint the waveform band over the strip.
+    if frame.open < 0.001:
+        image = _mirrored(image)
+    return image.resize((width, height), Image.LANCZOS)
+
+
+def _draw_strip(draw, placed, frame, scale) -> None:
+    """The dot, the state word, and each control beside its own key cap.
+
+    Alpha rides the strip's own real height against what its tallest content
+    needs -- `panel.strip_alpha` -- not `frame.open` directly. A part-grown
+    strip can be shorter than the 20pt key cap it holds, and at any alpha that
+    cap still clips against the panel's rounded corner; waiting until the
+    strip can actually hold its contents is what `strip_alpha` buys instead.
+    Exactly `flowbar_mac._PillView._draw_strip`'s reasoning, so both
+    renderers use the identical ramp.
+    """
+    alpha = int(round(panel.strip_alpha(placed.strip.h) * 255))
+    if alpha <= 0:
+        return
+
+    def font(size):
+        try:
+            return ImageFont.load_default(size * scale)
+        except TypeError:      # Pillow < 10.1 takes no size argument
+            return ImageFont.load_default()
+
+    if placed.dot is not None:
+        rgb = (panel.DOT_TRANSCRIBING_RGB
+               if frame.state == flowbar.TRANSCRIBING
+               else panel.DOT_RECORDING_RGB)
+        draw.ellipse(
+            (placed.dot.x * scale, placed.dot.y * scale,
+             placed.dot.right * scale, placed.dot.bottom * scale),
+            fill=rgb + (alpha,),
+        )
+    if placed.state_rect is not None and placed.state_label:
+        draw.text(
+            (placed.state_rect.x * scale, placed.state_rect.y * scale),
+            placed.state_label, font=font(panel.LABEL_FONT_SIZE),
+            fill=panel.TEXT_RGB + (alpha,),
+        )
+    for item in placed.items:
+        if item.id == frame.hover:
+            draw.rounded_rectangle(
+                (item.hover_rect.x * scale, item.hover_rect.y * scale,
+                 item.hover_rect.right * scale, item.hover_rect.bottom * scale),
+                radius=item.hover_rect.h * scale / 2.0,
+                fill=panel.HOVER_FILL_RGB + (alpha,),
+            )
+        draw.text(
+            (item.label_rect.x * scale, item.label_rect.y * scale),
+            item.label, font=font(panel.LABEL_FONT_SIZE),
+            fill=panel.TEXT_RGB + (alpha,),
+        )
+        if item.cap_rect is not None:
+            draw.rounded_rectangle(
+                (item.cap_rect.x * scale, item.cap_rect.y * scale,
+                 item.cap_rect.right * scale, item.cap_rect.bottom * scale),
+                radius=panel.CAP_RADIUS * scale,
+                fill=panel.CAP_FILL_RGB + (alpha,),
+            )
+            draw.text(
+                ((item.cap_rect.x + panel.CAP_PAD_X) * scale,
+                 (item.cap_rect.y + 4.0) * scale),
+                item.cap, font=font(panel.CAP_FONT_SIZE),
+                fill=panel.TEXT_RGB + (alpha,),
+            )
+    if placed.divider is not None:
+        draw.rectangle(
+            (placed.divider.x * scale, placed.divider.y * scale,
+             placed.divider.right * scale, placed.divider.bottom * scale),
+            fill=panel.HAIRLINE_RGB + (alpha,),
+        )
 
 
 def _mirrored(image: Image.Image) -> Image.Image:
@@ -447,7 +596,7 @@ class FlowBar:
     def _draw(self) -> None:
         frame = self._indicator.next_frame()
         width = int(round(frame.width))
-        height = int(wf.PILL_HEIGHT)
+        height = int(round(frame.height))
         if width != self._width:
             self._width = width
             self._reposition(width, height)

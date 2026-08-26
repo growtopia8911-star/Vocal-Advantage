@@ -23,6 +23,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from vocal_advantage import flowbar
+from vocal_advantage import panel
 from vocal_advantage import waveform as wf
 from vocal_advantage.flowbar import Frame
 from vocal_advantage.flowbar_win import (
@@ -126,13 +128,17 @@ def test_a_transparent_pill_really_is_transparent():
 
 
 def test_louder_bars_paint_more_ink():
+    """`panel.PILL_FILL_RGB` is near-black and `panel.BAR_RGB` is light --
+    inverted from the old cream pill's dark-on-light bars (the whole panel
+    redesign this task pulls in). "More ink" now means more *bright* pixels,
+    not more dark ones."""
     def ink(heights):
         image = render_frame(a_frame(heights=heights), 78, 30)
         return sum(
             1
             for x in range(78)
             for y in range(30)
-            if sum(image.getpixel((x, y))[:3]) < 200
+            if sum(image.getpixel((x, y))[:3]) > 400
             and image.getpixel((x, y))[3] > 128
         )
 
@@ -281,3 +287,107 @@ def test_y_for_a_dragged_point_is_measured_downward():
     _, near_top = point_origin([960.0, 100.0], 78, 30, 1920, 1080)
     _, near_bottom = point_origin([960.0, 1000.0], 78, 30, 1920, 1080)
     assert near_top < near_bottom
+
+
+# ---------------------------------------------------------------------------
+# The panel -- the same rects `panel.layout` gives the macOS renderer, drawn
+# with Pillow instead of AppKit.
+# ---------------------------------------------------------------------------
+
+
+def a_panel_frame(**kwargs):
+    defaults = dict(
+        state=flowbar.RECORDING,
+        heights=(0.5,) * wf.BUFFER_BARS,
+        text="", width=panel.PANEL_WIDTH, pill_alpha=1.0, bar_alpha=1.0,
+        text_alpha=0.0, open=1.0, height=panel.PANEL_HEIGHT,
+        radius=panel.PANEL_RADIUS,
+        strip=(
+            panel.StripItem("stop", "Stop", "F8"),
+            panel.StripItem("cancel", "Cancel", "Esc"),
+        ),
+        hover="",
+    )
+    defaults.update(kwargs)
+    return flowbar.Frame(**defaults)
+
+
+def test_the_panel_renders_at_its_full_size():
+    image = render_frame(a_panel_frame(), 420, 96)
+    assert image.size == (420, 96)
+
+
+def test_the_two_bands_are_different_colours():
+    """Gate 1a. The strip is charcoal; the band is near-black."""
+    image = render_frame(a_panel_frame(), 420, 96).convert("RGB")
+    band = image.getpixel((30, 20))
+    strip = image.getpixel((210, 80))
+    assert sum(strip) > sum(band) + 40
+
+
+def test_neither_band_is_flat():
+    """Gate 1b."""
+    image = render_frame(a_panel_frame(), 420, 96).convert("RGB")
+    assert image.getpixel((30, 4)) != image.getpixel((30, 50))
+    assert image.getpixel((210, 60)) != image.getpixel((210, 92))
+
+
+def test_the_panel_is_not_forced_symmetric():
+    """`_mirrored` exists for the pill and is wrong here: the panel's top and
+    bottom halves are different by design. Applying it would paint a mirrored
+    waveform band over the control strip."""
+    image = render_frame(a_panel_frame(), 420, 96).convert("RGB")
+    top = image.getpixel((210, 10))
+    bottom = image.getpixel((210, 86))
+    assert top != bottom
+
+
+def test_the_pill_is_still_forced_symmetric():
+    """And the pill still gets it, for the reason `_mirrored` documents."""
+    image = render_frame(a_frame(), 78, 30).convert("RGBA")
+    for y in range(6):
+        assert image.getpixel((39, y)) == image.getpixel((39, 29 - y))
+
+
+def test_the_panel_has_an_outer_border():
+    """Gate 1c. Lighter than either band, on all four edges."""
+    image = render_frame(a_panel_frame(), 420, 96).convert("RGB")
+    edge = image.getpixel((210, 0))
+    inside = image.getpixel((210, 8))
+    assert sum(edge) > sum(inside)
+
+
+def test_the_tallest_bar_is_about_69_percent_of_the_band():
+    """Gate 1e. Measured off superwhisper, not chosen -- a full-height trace
+    reads as clipping and a short one reads as a dead microphone."""
+    image = render_frame(
+        a_panel_frame(heights=(1.0,) * wf.BUFFER_BARS), 420, 96
+    ).convert("RGB")
+    band_h = panel.BAND_HEIGHT
+    # Scanned across the whole band rather than down one column: the bars sit
+    # on a 4pt pitch, so a hard-coded x is one constant change away from
+    # landing in a gap and asserting about the background.
+    lit = [
+        y for y in range(int(band_h))
+        if any(image.getpixel((x, y))[0] > 120 for x in range(80, 340))
+    ]
+    assert lit, "no bars were drawn at all"
+    assert 0.60 < (max(lit) - min(lit) + 1) / band_h < 0.78
+
+
+def test_the_renderer_computes_no_layout_of_its_own():
+    """Gate 5a. Every rect comes from panel.py, or the platforms drift."""
+    import inspect
+    from vocal_advantage import flowbar_win
+    source = inspect.getsource(flowbar_win.render_frame)
+    assert "panel.layout(" in source
+    assert "STRIP_HEIGHT" not in source
+    assert "BAND_HEIGHT" not in source
+
+
+def test_writes_a_png_to_look_at(tmp_path):
+    """The honest substitute for eyeballing this on Windows. Not an assertion
+    about beauty -- it is the fixture the spec's verification table names."""
+    out = tmp_path / "panel.png"
+    render_frame(a_panel_frame(), 420, 96).save(out)
+    assert out.stat().st_size > 0
