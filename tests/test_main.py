@@ -1545,3 +1545,81 @@ def test_each_launcher_wires_a_usable_paster(platform_name, tmp_path, monkeypatc
     assert built, "no paster was constructed"
     for inner in built:
         assert callable(getattr(inner, "paste_text", None)), inner
+
+
+# --------------------------------------------------------------------------
+# The launchers hand the bar the configured hotkey
+# --------------------------------------------------------------------------
+#
+# Replaces test_flowbar_legend.py::test_each_launcher_hands_the_bar_a_legend,
+# which spied on this same Indicator() call for the `legend=` kwarg that
+# argument replaced. flowbar.Frame no longer carries a legend string, but the
+# launcher still has to hand *something* correct to Indicator's `hotkey=`, and
+# nothing else checks that main.py:1131-1133 actually does -- the two tests
+# that merely stop the launcher past this line (above, and
+# test_run_app_on_mac_never_touches_tkinter) assert nothing about what was
+# passed.
+
+
+@pytest.mark.parametrize(
+    "platform_name,expects_hotkey",
+    [
+        ("darwin", True),
+        # Not yet: main.py:977 (_run_app_windows) does not pass a hotkey to
+        # Indicator at all. That is Task 8's job, same as cancel_key on both
+        # platforms -- this asserts what is true now, not what Task 8 will
+        # make true.
+        ("win32", False),
+    ],
+)
+def test_each_launcher_hands_the_bar_the_configured_hotkey(
+    platform_name, expects_hotkey, tmp_path, monkeypatch
+):
+    """Neither launcher is covered end to end -- every test that drives one
+    stops at the model load -- so the wiring has to be checked where it
+    happens.
+
+    Same shape as ``test_each_launcher_wires_a_usable_paster`` above: spy on
+    the constructor call itself, because a hotkey that silently never reaches
+    the Indicator looks exactly like a bar that has nothing to say.
+    """
+    # Imported before sys.platform is faked, and deliberately. `flowbar_win`
+    # builds `ctypes.WinDLL("user32")` at module scope behind a platform guard,
+    # so importing it *while* pretending to be Windows runs that on a Mac and
+    # dies. Getting it into sys.modules first makes the guard a no-op.
+    from vocal_advantage import flowbar as fb
+    from vocal_advantage import flowbar_win, hotkey_win, paste_win  # noqa: F401
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"hotkey": "ctrl+alt+d"}, indent=2) + "\n", encoding="utf-8"
+    )
+
+    monkeypatch.setattr(va_main.sys, "platform", platform_name)
+
+    class StopAfterWiring(Exception):
+        pass
+
+    built: list = []
+
+    def spy(*args, **kwargs):
+        built.append(kwargs.get("hotkey", ""))
+        raise StopAfterWiring
+
+    monkeypatch.setattr(fb, "Indicator", spy)
+
+    launcher = (
+        va_main._run_app_mac if platform_name == "darwin"
+        else va_main._run_app_windows
+    )
+    with pytest.raises(StopAfterWiring):
+        launcher(config_path)
+
+    assert built, "no Indicator was constructed"
+    if expects_hotkey:
+        # Not a hardcoded display string: whatever parse_hotkey/str() does to
+        # "ctrl+alt+d" today is what the launcher must hand over too, so this
+        # stays correct if the display format ever changes.
+        assert built[0] == str(parse_hotkey("ctrl+alt+d")), built[0]
+    else:
+        assert built[0] == "", built[0]
