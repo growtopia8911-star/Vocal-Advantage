@@ -1,0 +1,343 @@
+# Flow Bar panel — spec
+
+Written 2026-08-25. Amends gate 1 of [`2026-08-25-interface-design.md`](2026-08-25-interface-design.md),
+which reserved the Flow Bar's identity and added only a text legend. That gate
+is now partly reversed; see **Amendments** at the end.
+
+**Source of truth for every measurement below:** the native-resolution captures
+in `design-research/superwhisper/assets/` (gitignored), not the prose in
+[`../superwhisper-teardown.md`](../superwhisper-teardown.md). The teardown calls
+the recording window "roughly 3:1"; measured, it is **4.74:1**. Where the two
+disagree, the pixels win.
+
+All superwhisper figures are **÷2 from a 2× capture** and therefore in points.
+
+---
+
+## What is being built
+
+The Flow Bar becomes superwhisper's **main recording window**: a two-band
+rounded panel with a near-black waveform band above a charcoal control strip.
+It is one object with two shapes — a small resting pill that grows into the
+panel while you dictate and shrinks back afterwards.
+
+Not being built: their mini-window three-icon cluster, their resize toggle,
+their context-capture glyph. Reasons in **Rejected**.
+
+---
+
+## Measurements
+
+From `get-started-interface-rec-window-001.png` (the panel) and `-012.png`
+(the mini pill).
+
+| | Superwhisper, measured | Vocal Advantage today | Chosen |
+| --- | --- | --- | --- |
+| Panel | 600 × 126, radius ~12 | — | **420 × 96**, radius 12 |
+| Aspect | 4.74 : 1 | — | 4.4 : 1 — see below |
+| Waveform band | 80 | — | **57** |
+| Hairline | 1 pt `#636464` | — | same |
+| Control strip | 46 (band:strip 1.76:1) | — | **38** |
+| Outer border | 1 pt, `#535353` top → `#747676` sides | none | same |
+| Band fill | gradient `#181818` → `#010101` | flat `#F7F6F1` | same |
+| Strip fill | gradient `#2E2F2F` → `#232424` | — | same |
+| Bar colour | `#D5D5D5` | black | same |
+| Bar / gap | 2.0 / 2.0 — **1:1** | 1.5 / 2.2 — 1.47:1 | **2.0 / 2.0** |
+| Peak amplitude | 69% of band height | — | same |
+| Strip text | `#AFB0B0`, ~13 pt | `#575757`, 9.5 pt | same |
+| Key cap chip | `#1F2020`, radius ~6 | — | same |
+| Status dot | `#3279C0` blue | — | see state table |
+| Record red | `#FF453A` (Apple system red) | — | used for the recording dot |
+| Mini pill | ~58 × 30, fill `#0B0B0B` | 78 × 30, fill `#F7F6F1` | **78 × 30**, fill `#0B0B0B` |
+
+**Two departures from exact, each on purpose.**
+
+*4.4:1 rather than 4.74:1.* Scaling 600 × 126 down to 420 would give a 30 pt
+strip, and 13 pt text in a 30 pt strip has no room to breathe. The strip holds a
+legible fixed height and the band takes the loss. The panel is squatter than
+theirs and reads correctly; a proportionally-correct panel with 9 pt text would
+not.
+
+*420 rather than 600.* Theirs occupies 42% of a 1440 pt screen. 420 is 29%.
+Nothing is lost but presence, and this app's bar sits over your work.
+
+**Nothing is a flat fill.** Both bands are vertical gradients, and that is most
+of why their panel does not look like a rectangle of paint. Reproducing the two
+gradients matters more than any single hex value here.
+
+---
+
+## The two shapes
+
+```
+IDLE                RECORDING                       TRANSCRIBING
+.--------.          .---------------------------.   .---------------------------.
+| ..il|i. |   -->   |   ..il|II|l..  ..il|I|l.. |   |     . . il|Ili| . .       |
+'--------'          |---------------------------|   |---------------------------|
+ 78 x 30            | (o) Recording  Stop | Canc |   | (o) Transcribing          |
+ radius 15          '---------------------------'   '---------------------------'
+ full-round          420 x 96, radius 12              right group absent
+```
+
+The grow eases **width, height and corner radius together** (15 → 12), and the
+strip's alpha rides the width so it never draws squashed mid-animation.
+`point_origin` already treats its anchor as `(centre_x, bottom_y)`, so the
+bottom edge stays put and the panel opens upward — the correct behaviour at the
+bottom of a screen, for free.
+
+### The trace across both shapes
+
+One ring buffer of **69 heights**. The panel draws all 69; the pill draws a
+window onto the newest 15. No bar count is ever interpolated, and the grow
+*reveals history* rather than resetting the trace.
+
+69 bars at a 4 pt pitch is 274 pt of content in a 420 pt panel — 65% of the
+width, against superwhisper's ~66%. At `SCROLL_FRAMES = 6` and 60 fps that is
+**6.9 seconds** of visible history, up from today's 1.5.
+
+`bar_layout` already accepts `bar_width` and `gap` as arguments, so this needs
+no signature change. At 2.0 / 2.0 the pill's 15 bars are 58 pt of content inside
+78 pt, leaving 10 pt margins where there are 12 today — still clear of the round
+caps that `BAR_MARGIN_Y` exists to protect.
+
+Band half-height is 28.5; at 69% peak amplitude the tallest bar is 19.7,
+so the band's vertical margin is **8.8**, against `BAR_MARGIN_Y = 3.5` in the
+pill. Two constants, one per shape.
+
+---
+
+## The control strip
+
+```
+  (o) Recording                        Stop [F8]  |  Cancel [Esc]
+   ^        ^                            ^    ^   ^
+   |        |                            |    |   '- 1pt divider, #636464
+   |        |                            |    '- key cap: #1F2020 chip, radius 6,
+   |        |                            |       DARKER than the strip it sits on
+   |        |                            '- label, #AFB0B0
+   |        '- state word, #AFB0B0 13pt
+   '- 8pt dot
+```
+
+Every action is **label + its keyboard shortcut, side by side, at nearly equal
+visual weight**. That is the single transferable pattern from their strip and it
+is the whole reason the strip exists.
+
+The left group holds a dot and a state word only. Gate 6 of the interface spec
+later inserts a profile name and its switch shortcut beside the dot without
+moving anything else.
+
+### Why the right group vanishes while transcribing
+
+`LEGEND_STATES = frozenset({RECORDING})` in `flowbar.py` already carries this
+decision, and its reasoning survives the redesign verbatim:
+
+> Not TRANSCRIBING either, which is the one that looks wrong and is not — once
+> the model has the audio, no key stops it and none bins the result, so anything
+> the legend said there would be false.
+
+Drawing a `Stop` that stops nothing is worse than an empty strip.
+
+---
+
+## States
+
+| State | Shape | Dot | Trace | Right group |
+| --- | --- | --- | --- | --- |
+| `IDLE` | pill 78 × 30, alpha 0.82 | none | `idle_heights` | — |
+| `RECORDING` | panel 420 × 96 | `#FF453A` | live, from audio | `Stop` + `Cancel` |
+| `TRANSCRIBING` | panel 420 × 96 | `#3279C0` | `transcribing_heights` sweep | — |
+| `MESSAGE` | pill, widened to fit the text | none — a pill has no strip | replaced by the text | — |
+
+`MESSAGE` stays pill-shaped. A panel is for dictating; "could not paste" should
+not open one. This preserves today's `message_width` behaviour unchanged.
+
+The existing `PILL_ALPHA` / `BAR_ALPHA` / `TEXT_ALPHA` tables and `FADE_ALPHA`
+easing are unchanged in shape — only the ground and bar colours invert.
+
+---
+
+## Interaction
+
+Superwhisper's strip is clickable: hover fills a rounded pill behind an item,
+and at rest nothing has a border. Reproducing that collides with the three
+guards documented at the top of `flowbar_mac.py`, which exist because a panel
+that takes focus sends the paste into our own process.
+
+**Resolution: click-through by default, interactive only under the cursor.**
+
+Poll the cursor on the 60 fps timer that already runs. On entering the panel,
+drop click-through and draw hover pills; on leaving, restore it. The
+non-activating panel (macOS) and `WS_EX_NOACTIVATE` (Windows) already guarantee
+that a click never activates this process, so focus is never stolen — the only
+cost is that while the pointer is over the panel, clicks land on it instead of
+what is underneath. That is exactly superwhisper's behaviour.
+
+| | macOS | Windows |
+| --- | --- | --- |
+| Read cursor | `NSEvent.mouseLocation` | `GetCursorPos` |
+| Drop click-through | `setIgnoresMouseEvents_(False)` | clear `WS_EX_TRANSPARENT` |
+| Restore | `setIgnoresMouseEvents_(True)` | set `WS_EX_TRANSPARENT` |
+
+`Move bar` mode already toggles exactly these on both platforms, so this is a
+second caller of machinery that exists, not new machinery.
+
+**Clicks need a return channel that does not exist.** `Indicator` is a one-way
+queue today. It gains `on_stop` and `on_cancel` callables, invoked on the UI
+thread, which poke the controller the same way the hotkey thread already does.
+
+---
+
+## Code shape
+
+### New: `vocal_advantage/panel.py`
+
+Pure arithmetic. Given a width, height and the strip's items it returns rects
+for the band, the strip, the hairline, the dot, the label, each key cap and the
+divider — plus `hit_test(x, y) -> item_id | None`.
+
+Both renderers consume it, so the two platforms **cannot** drift, and the layout
+*and the hover logic* are unit-testable on any machine — exactly the property
+`pill_origin` was given for the same reason.
+
+### Changed: `vocal_advantage/flowbar.py`
+
+- `Frame` gains `hover: str = ""` (the hovered item id, `""` for none) and
+  `strip: tuple[StripItem, ...] = ()`, where a `StripItem` is
+  `(id, label, key_cap)` — `id` is what `hit_test` returns and what `hover`
+  holds. `legend: str` goes.
+- `legend_width` / `LEGEND_CHAR_WIDTH` / `LEGEND_GAP` go — a fixed-size panel
+  does not measure text to size itself.
+- `LEGEND_STATES` survives under a clearer name as the set of states that show
+  the right group. The frozenset and its comment are kept.
+- The width ease is **kept and becomes load-bearing**: it drives the pill↔panel
+  grow. Height and radius ease alongside it.
+
+### Changed: `flowbar_mac.py`, `flowbar_win.py`
+
+Both draw from `panel.py`'s rects. Neither computes a layout.
+
+Deliberately **not** WKWebView, despite `pyproject.toml` already carrying
+`pyobjc-framework-WebKit` for the settings window: the bar must be
+click-through, non-activating and redraw at 60 fps, and there is no equivalent
+already built on Windows. The two native renderers stay.
+
+---
+
+## Gates
+
+### 1. The panel
+
+- [ ] 1a. Two bands, near-black above charcoal, separated by a 1 pt hairline.
+- [ ] 1b. Both band fills are vertical gradients, not flat.
+- [ ] 1c. A 1 pt outer border, lighter than either band.
+- [ ] 1d. 420 × 96 with a 12 pt radius; band 57, strip 38.
+- [ ] 1e. Bars are `#D5D5D5`, 2.0 wide with 2.0 gaps, peaking at 69% of band
+      height.
+
+### 2. The strip
+
+- [ ] 2a. Left group is a state dot and a state word.
+- [ ] 2b. Right group is `Stop` and `Cancel`, each a label beside its own key
+      cap, separated by a 1 pt divider.
+- [ ] 2c. Key cap chips are darker than the strip they sit on.
+- [ ] 2d. The right group is absent in every state but `RECORDING`.
+- [ ] 2e. The `Stop` cap shows the configured hotkey, and follows a change to it.
+
+### 3. The two shapes
+
+- [ ] 3a. Idle rests as a 78 × 30 full-round pill.
+- [ ] 3b. Recording grows it to the panel; width, height and radius all ease.
+- [ ] 3c. The bottom edge does not move during the grow.
+- [ ] 3d. The strip never draws squashed: its alpha rides the width.
+- [ ] 3e. The trace is one 69-slot buffer; the pill windows its newest 15, and
+      the grow reveals history rather than clearing it.
+- [ ] 3f. A `flash()` message widens the pill and does not open the panel.
+
+### 4. Interaction
+
+- [ ] 4a. With the cursor away from the panel, a click passes through to the
+      window underneath.
+- [ ] 4b. With the cursor over the panel, `Stop` and `Cancel` fill a hover pill.
+- [ ] 4c. Clicking `Stop` ends the recording; clicking `Cancel` discards it.
+- [ ] 4d. Neither click activates this process or moves focus.
+- [ ] 4e. Leaving the panel restores click-through.
+- [ ] 4f. `hit_test` agrees with what is drawn, on both platforms, in a test.
+
+### 5. Parity
+
+- [ ] 5a. Both renderers take every rect from `panel.py`; neither computes one.
+- [ ] 5b. `render_frame` produces the panel at 420 × 96 on this Mac.
+- [ ] 5c. Nothing in `panel.py` imports AppKit, Win32 or Pillow.
+
+---
+
+## Verification
+
+Per the vault note `Spec + Test Driven`, visual work gets a fixture to eyeball;
+logic gets a test that is watched to fail first.
+
+| What | How | Where it runs |
+| --- | --- | --- |
+| Layout arithmetic | unit tests on `panel.py` | anywhere |
+| Hit-testing / hover | unit tests on `hit_test` | anywhere |
+| Windows **drawing** | `render_frame` → PNG, asserted and eyeballed | **this Mac** |
+| macOS drawing | existing `test_flowbar_mac.py` patterns | this Mac |
+| State/lifecycle | `Indicator` frame sequences | anywhere |
+
+`tests/test_flowbar_win.py:10` already records that `render_frame` is *"pure
+Pillow, no Win32 at all"* and exercises it here. So the Windows **drawing** is
+verifiable on this machine by writing PNGs.
+
+**What cannot be verified from this Mac, and will not be claimed:** the Win32
+plumbing — `WS_EX_TRANSPARENT` toggling, `GetCursorPos` polling, and the layered
+window's behaviour under a real cursor. It gets written and unit-tested where
+possible, and reported as unverified.
+
+`tests/test_flowbar_legend.py` is superseded and its cases move to the strip.
+
+---
+
+## Rejected
+
+- **Their mini window's three-icon cluster** (sparkle / record / expand). Every
+  one of its three actions is a feature this app does not have: no modes to
+  change, no click-to-record, no second window to expand into.
+- **Their resize toggle and context-capture glyph.** Nothing to toggle to, and
+  no context capture. Drawing them dark would be a picture of a different
+  product — the same rule the interface spec applied to the dropped 40%.
+- **A profile name in the strip.** Gate 6 does not exist. Gate 1a of the
+  interface spec refuses to invent a name, and that still holds.
+- **600 pt wide.** Faithful, and too much furniture over your work.
+- **Hiding the bar at idle.** Faithful to their window lifecycle, but it deletes
+  the resting thing you glance at. The mini pill keeps it.
+- **Always-clickable.** Simplest code, but the panel would permanently eat
+  clicks at the bottom of the screen, including ones meant for the Dock.
+- **WKWebView.** Available on macOS, absent on Windows, and wrong for a 60 fps
+  click-through overlay.
+
+---
+
+## Amendments to `2026-08-25-interface-design.md`
+
+- **Gate 1e is reversed.** "The pill keeps its warm paper ground and black bars.
+  The identity does not change" — it does now: near-black ground, white bars.
+- **Gates 1b and 1c stand** but are restated as strip items rather than legend
+  text.
+- **Gate 1a is unchanged and still blocked** on gate 6. The dot and state word
+  hold the slot.
+
+---
+
+## Order
+
+1. `panel.py` — layout and hit-testing, with its tests. Nothing draws yet.
+2. `flowbar.py` — `Frame`, hover, the pill↔panel ease.
+3. `flowbar_mac.py` — draw the panel. First point it is on screen.
+4. `flowbar_win.py` — `render_frame` for the panel, verified by PNG here.
+5. Hover and click-through toggling, both platforms.
+6. `on_stop` / `on_cancel` wired to the controller.
+7. Amend the interface spec's gate 1.
+
+Steps 1–2 are the ones worth getting right; 3 and 4 are transcription once the
+rects exist.
