@@ -81,14 +81,20 @@ Numbered so a test or a hand-check can name one.
 
 ### 1. Flow Bar control strip — BUILT + small addition
 
+*Superseded in part by the panel spec: 1b and 1c still hold but are now strip
+items rather than legend text. 1a is unchanged and still blocked on gate 6.*
+
 - [ ] 1a. The strip shows the active profile name.
       *Blocked on gate 6: there are no profiles. The slot shows the hotkey
       instead of inventing a profile name that would mean nothing.*
 - [x] 1b. It shows the current hotkey rendered as a key cap, not prose.
 - [x] 1c. It shows Stop and Cancel, each with its own key cap.
 - [x] 1d. The strip is legible in all four existing states.
-- [x] 1e. The pill keeps its warm paper ground and black bars. The identity does
-      not change; only the legend is added.
+- [x] 1e. ~~The pill keeps its warm paper ground and black bars.~~
+      **Reversed 2026-08-25.** The ground is near-black and the bars white, and
+      the pill grows into a two-band panel while recording. See
+      [`2026-08-25-flow-bar-panel.md`](2026-08-25-flow-bar-panel.md), which
+      records why and what was measured.
 
 ### 2. Menu bar state dot — BUILT + small addition
 

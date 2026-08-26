@@ -745,28 +745,7 @@ class _EmptyDictionary:
         return text
 
 
-def legend_for(spec: HotkeySpec) -> str:
-    """What the Flow Bar says while it is recording.
-
-    Composed here rather than in `flowbar.py`, which deliberately knows nothing
-    about hotkeys -- it is handed a finished string and carries it.
-
-    Both halves name the key that performs the action, because that is the one
-    habit worth taking from the researched app: a control and its key sit
-    together, permanently, rather than the key living in a settings pane the
-    user has to go and look at. Until now the hotkey appeared nowhere on screen
-    at all and was knowable only from the README.
-
-    The `esc` half is dropped when esc *is* the hotkey. `_handle_down` gives the
-    hotkey precedence there, so advertising a cancel that cannot happen would
-    make the bar lie about the one thing it is on screen to say.
-    """
-    if CANCEL_KEY in spec.keys:
-        return "%s stops" % spec
-    return "%s stops · %s cancels" % (spec, CANCEL_KEY)
-
-
-def _make_flow_bar(cfg: dict, indicator):
+def _make_flow_bar(cfg: dict, indicator, on_click=None):
     """The overlay, or None if it is switched off or refuses to start.
 
     Never raises. Dictation is the product and the bar is decoration: losing it
@@ -785,6 +764,7 @@ def _make_flow_bar(cfg: dict, indicator):
             indicator,
             position=cfg["flow_bar_position"],
             point=cfg["flow_bar_point"],
+            on_click=on_click,
         )
         bar.open()
         return bar
@@ -969,12 +949,14 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     # by PortAudio's thread and read here lock-free -- there is no second
     # microphone stream anywhere in this project.
     #
-    # No legend here, deliberately. `flowbar_win.render_frame` draws no text --
-    # there is no font in that file, `frame.text` is dropped, and flash
-    # messages have never reached the Windows bar either. Passing one would
-    # widen the pill and stretch the trace to display nothing. It goes back in
-    # the moment that renderer can draw a string.
-    indicator = Indicator(level_source=lambda: recorder.level)
+    # The Windows renderer can draw text as of the panel work, so the hotkey
+    # goes in here too -- the comment that used to sit here explained why it
+    # could not, and that reason is gone.
+    indicator = Indicator(
+        level_source=lambda: recorder.level,
+        hotkey=str(spec),
+        cancel_key="" if CANCEL_KEY in spec.keys else CANCEL_KEY,
+    )
 
     dictionary = _load_dictionary()
     player = _make_player(cfg)
@@ -1028,9 +1010,22 @@ def _run_app_windows(config_path: Path = CONFIG_PATH) -> int:
     listener = HotkeyListener(spec, on_key)
     listener.start()
 
+    def activate(item_id: str) -> None:
+        """Perform a Flow Bar control, by the id `panel.hit_test` returned.
+
+        A click and the key it names go through the same request, so they
+        cannot drift into doing two different things.
+        """
+        action = {
+            "stop": controller.request_stop,
+            "cancel": controller.request_cancel,
+        }.get(item_id)
+        if action is not None:
+            action()
+
     # UI last: by here the hotkey already works, so anything below failing
     # costs decoration and never dictation.
-    bar = _make_flow_bar(cfg, indicator)
+    bar = _make_flow_bar(cfg, indicator, on_click=activate)
     changer = HotkeyChanger(
         listener=listener, spec=spec, on_key=on_key, controller=controller,
         indicator=indicator, config_path=config_path,
@@ -1128,13 +1123,10 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     # The level tap the waveform reads: a plain float on the recorder, written
     # by PortAudio's thread and read lock-free by the renderer. No second
     # microphone stream.
-    # legend_for is unused here for now: Indicator no longer takes a `legend`
-    # string, it takes `hotkey` and `cancel_key` and lays out its own strip.
-    # Passing the hotkey through is the easy, safe part of that; wiring
-    # cancel_key (and dropping legend_for for good) is Task 8's job, once the
-    # renderer actually draws the strip.
     indicator = Indicator(
-        level_source=lambda: recorder.level, hotkey=str(spec)
+        level_source=lambda: recorder.level,
+        hotkey=str(spec),
+        cancel_key="" if CANCEL_KEY in spec.keys else CANCEL_KEY,
     )
 
     dictionary = _load_dictionary()
@@ -1210,7 +1202,23 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
         warn("No NSApplication, so there is no menu bar icon and no overlay.")
         warn(traceback.format_exc())
 
-    bar = _make_flow_bar(cfg, indicator) if app is not None else None
+    def activate(item_id: str) -> None:
+        """Perform a Flow Bar control, by the id `panel.hit_test` returned.
+
+        A click and the key it names go through the same request, so they
+        cannot drift into doing two different things.
+        """
+        action = {
+            "stop": controller.request_stop,
+            "cancel": controller.request_cancel,
+        }.get(item_id)
+        if action is not None:
+            action()
+
+    bar = (
+        _make_flow_bar(cfg, indicator, on_click=activate)
+        if app is not None else None
+    )
     changer = HotkeyChanger(
         listener=listener, spec=spec, on_key=on_key, controller=controller,
         indicator=indicator, config_path=config_path,

@@ -1555,25 +1555,19 @@ def test_each_launcher_wires_a_usable_paster(platform_name, tmp_path, monkeypatc
 # which spied on this same Indicator() call for the `legend=` kwarg that
 # argument replaced. flowbar.Frame no longer carries a legend string, but the
 # launcher still has to hand *something* correct to Indicator's `hotkey=`, and
-# nothing else checks that main.py:1131-1133 actually does -- the two tests
-# that merely stop the launcher past this line (above, and
+# nothing else checks that main.py actually does -- the two tests that merely
+# stop the launcher past this line (above, and
 # test_run_app_on_mac_never_touches_tkinter) assert nothing about what was
 # passed.
+#
+# Both platforms now pass the hotkey (Task 8): the Windows launcher used to
+# omit it because `flowbar_win.render_frame` drew no text, and that stopped
+# being true once the panel work gave it a font.
 
 
-@pytest.mark.parametrize(
-    "platform_name,expects_hotkey",
-    [
-        ("darwin", True),
-        # Not yet: main.py:977 (_run_app_windows) does not pass a hotkey to
-        # Indicator at all. That is Task 8's job, same as cancel_key on both
-        # platforms -- this asserts what is true now, not what Task 8 will
-        # make true.
-        ("win32", False),
-    ],
-)
+@pytest.mark.parametrize("platform_name", ["darwin", "win32"])
 def test_each_launcher_hands_the_bar_the_configured_hotkey(
-    platform_name, expects_hotkey, tmp_path, monkeypatch
+    platform_name, tmp_path, monkeypatch
 ):
     """Neither launcher is covered end to end -- every test that drives one
     stops at the model load -- so the wiring has to be checked where it
@@ -1616,10 +1610,7 @@ def test_each_launcher_hands_the_bar_the_configured_hotkey(
         launcher(config_path)
 
     assert built, "no Indicator was constructed"
-    if expects_hotkey:
-        # Not a hardcoded display string: whatever parse_hotkey/str() does to
-        # "ctrl+alt+d" today is what the launcher must hand over too, so this
-        # stays correct if the display format ever changes.
-        assert built[0] == str(parse_hotkey("ctrl+alt+d")), built[0]
-    else:
-        assert built[0] == "", built[0]
+    # Not a hardcoded display string: whatever parse_hotkey/str() does to
+    # "ctrl+alt+d" today is what the launcher must hand over too, so this
+    # stays correct if the display format ever changes.
+    assert built[0] == str(parse_hotkey("ctrl+alt+d")), built[0]

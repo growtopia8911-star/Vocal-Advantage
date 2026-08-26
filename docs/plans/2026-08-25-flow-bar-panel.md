@@ -226,49 +226,105 @@ already built on Windows. The two native renderers stay.
 
 ## Gates
 
+Ticked 2026-08-25 (Task 8), against what was actually run — not against what
+merely has a test file. Method for each group is under **Verification** below.
+
 ### 1. The panel
 
-- [ ] 1a. Two bands, near-black above charcoal, separated by a 1 pt hairline.
-- [ ] 1b. Both band fills are vertical gradients, not flat.
-- [ ] 1c. A 1 pt outer border, lighter than either band.
-- [ ] 1d. 420 × 96 with a 12 pt radius; band 57, strip 38.
-- [ ] 1e. Bars are `#D5D5D5`, 2.0 wide with 2.0 gaps, peaking at 69% of band
+- [x] 1a. Two bands, near-black above charcoal, separated by a 1 pt hairline.
+- [x] 1b. Both band fills are vertical gradients, not flat.
+- [x] 1c. A 1 pt outer border, lighter than either band.
+- [x] 1d. 420 × 96 with a 12 pt radius; band 57, strip 38.
+- [x] 1e. Bars are `#D5D5D5`, 2.0 wide with 2.0 gaps, peaking at 69% of band
       height.
 
 ### 2. The strip
 
-- [ ] 2a. Left group is a state dot and a state word.
-- [ ] 2b. Right group is `Stop` and `Cancel`, each a label beside its own key
+- [x] 2a. Left group is a state dot and a state word.
+- [x] 2b. Right group is `Stop` and `Cancel`, each a label beside its own key
       cap, separated by a 1 pt divider.
-- [ ] 2c. Key cap chips are darker than the strip they sit on.
-- [ ] 2d. The right group is absent in every state but `RECORDING`.
-- [ ] 2e. The `Stop` cap shows the configured hotkey, and follows a change to it.
+- [x] 2c. Key cap chips are darker than the strip they sit on.
+- [x] 2d. The right group is absent in every state but `RECORDING`.
+- [ ] 2e. ~~The `Stop` cap shows the configured hotkey, and follows a change to
+      it.~~ First half only. `Indicator._hotkey` is set once, in `__init__`,
+      and has no setter; `HotkeyChanger._change()` (`main.py`) calls
+      `controller.set_hotkey(spec)` but never touches the indicator it was
+      built with. Changing the hotkey from the tray leaves the strip showing
+      the old key cap until the app restarts. Found by reading the code, not
+      by running it — out of scope for this task (`flowbar.py` is off limits
+      here), left as a gap for whoever picks up gate 6.
 
 ### 3. The two shapes
 
-- [ ] 3a. Idle rests as a 78 × 30 full-round pill.
-- [ ] 3b. Recording grows it to the panel; width, height and radius all ease.
-- [ ] 3c. The bottom edge does not move during the grow.
-- [ ] 3d. The strip never draws squashed: its alpha rides the width.
-- [ ] 3e. The trace is one 69-slot buffer; the pill windows its newest 15, and
+- [x] 3a. Idle rests as a 78 × 30 full-round pill.
+- [x] 3b. Recording grows it to the panel; width, height and radius all ease.
+- [ ] 3c. ~~The bottom edge does not move during the grow.~~ True on macOS
+      (`pill_origin`/`point_origin` there anchor on Cocoa's bottom-left window
+      origin, which does not depend on height). **False on Windows** for the
+      default, un-dragged position: `flowbar_win.pill_origin` takes no
+      `height` argument and hardcodes `wf.PILL_HEIGHT` (30) into its y, so
+      `_reposition` walks the window's bottom edge down by
+      `PANEL_HEIGHT - PILL_HEIGHT` (66 pt) as it grows to the panel. Windows'
+      own `point_origin` (the *dragged* path) does this correctly, computing
+      `y = bottom_y - height`; `pill_origin` alone is missing the same fix.
+      Every Windows install starts with `flow_bar_point: null` (the preset
+      path), so this hits by default, not only in an edge case. Found by
+      tracing `_origin` → `pill_origin` by hand; not run on Windows.
+      `flowbar_win.py` is off limits to this task, so left unfixed and flagged
+      here rather than silently ticked.
+- [x] 3d. The strip never draws squashed: its alpha rides the width.
+- [x] 3e. The trace is one 69-slot buffer; the pill windows its newest 15, and
       the grow reveals history rather than clearing it.
-- [ ] 3f. A `flash()` message widens the pill and does not open the panel.
+- [x] 3f. A `flash()` message widens the pill and does not open the panel.
 
 ### 4. Interaction
 
 - [ ] 4a. With the cursor away from the panel, a click passes through to the
       window underneath.
 - [ ] 4b. With the cursor over the panel, `Stop` and `Cancel` fill a hover pill.
-- [ ] 4c. Clicking `Stop` ends the recording; clicking `Cancel` discards it.
-- [ ] 4d. Neither click activates this process or moves focus.
+- [x] 4c. Clicking `Stop` ends the recording; clicking `Cancel` discards it.
+      Demonstrated, not merely unit-tested: the real, unmodified
+      `_PillView.mouseDown_` was called with a hovered item id and a real
+      `on_click`, wired to a real `DictationController` (fake recorder/
+      transcriber/paster) exactly as `main.py`'s `activate()` wires it. Cancel
+      left the controller `IDLE`, the recorder stopped, nothing transcribed or
+      pasted; Stop left it `IDLE` with a transcription and a paste. See
+      **Verification**.
+- [x] 4d. Neither click activates this process or moves focus. Static at
+      window-creation time on both platforms, not something the click path
+      can affect either way: macOS builds the panel
+      `NSWindowStyleMaskNonactivatingPanel` and shows it with
+      `orderFrontRegardless()`, never `makeKeyAndOrderFront_`; Windows creates
+      it with `WS_EX_NOACTIVATE` and shows it with `SW_SHOWNOACTIVATE`, never
+      `SW_SHOW`. Neither flag is touched again by any other code path. The
+      4c demonstration above also shows `mouseDown_`'s hover-hit branch never
+      calls anything window- or focus-related.
 - [ ] 4e. Leaving the panel restores click-through.
-- [ ] 4f. `hit_test` agrees with what is drawn, on both platforms, in a test.
+- [x] 4f. `hit_test` agrees with what is drawn, on both platforms, in a test.
+      Both `_hover_for` implementations and both `drawRect_`/`render_frame`
+      implementations consume the same `panel.layout(...)` call — confirmed
+      for Windows by `test_the_renderer_computes_no_layout_of_its_own`, and
+      for macOS by reading `drawRect_` directly (it takes every rect from one
+      `placed = panel.layout(...)` and never computes one). `hit_test` itself
+      is called on that same `placed` layout by both `_hover_for`s. Neither
+      platform can drift from what it draws.
+
+**4a, 4b and 4e are left unticked.** All three are the live cursor loop —
+`NSEvent.mouseLocation`/`_tick` on macOS, `GetCursorPos`/`WS_EX_TRANSPARENT`
+toggling on Windows — the exact plumbing this file's own Verification section
+below says was never run on Windows and, per `test_flowbar_mac.py`'s own
+docstring, is "hand-checked" rather than tested on macOS too. The pure
+functions underneath (`_hover_for`, `_contains`) are unit-tested on both
+platforms, and the drawn hover pill was directly observed for macOS (see
+Verification) — but ticking gates whose literal wording is "with the cursor
+over/away from the panel" on the strength of that alone would claim more than
+was run. Left unticked rather than claimed.
 
 ### 5. Parity
 
-- [ ] 5a. Both renderers take every rect from `panel.py`; neither computes one.
-- [ ] 5b. `render_frame` produces the panel at 420 × 96 on this Mac.
-- [ ] 5c. Nothing in `panel.py` imports AppKit, Win32 or Pillow.
+- [x] 5a. Both renderers take every rect from `panel.py`; neither computes one.
+- [x] 5b. `render_frame` produces the panel at 420 × 96 on this Mac.
+- [x] 5c. Nothing in `panel.py` imports AppKit, Win32 or Pillow.
 
 ---
 
@@ -293,6 +349,22 @@ verifiable on this machine by writing PNGs.
 plumbing — `WS_EX_TRANSPARENT` toggling, `GetCursorPos` polling, and the layered
 window's behaviour under a real cursor. It gets written and unit-tested where
 possible, and reported as unverified.
+
+**Task 8 addendum, on how gate 1/2/3's drawn-appearance ticks above were
+actually checked.** The macOS panel was rendered offscreen with a real
+`_PillView` — `bitmapImageRepForCachingDisplayInRect_` /
+`cacheDisplayInRect_toBitmapImageRep_` against a real `flowbar.Indicator` —
+and the PNGs (idle pill, recording panel, recording panel with `Cancel`
+hovered, transcribing) were looked at directly: two bands, the hairline, the
+outer border, white bars, the dot, state word, both key caps, the divider, and
+the hover fill were all visible exactly as specced. The Windows renderer was
+checked the way this table already prescribes: `render_frame` on a
+`RECORDING` frame, saved to PNG, and looked at — same layout, same colours,
+Pillow rather than AppKit. Gate 4c was checked as described in the gate
+itself, by calling the real `mouseDown_`. **The Win32 window plumbing itself —
+the layered window under a real cursor, `WS_EX_TRANSPARENT` toggling driven by
+`GetCursorPos` — has still never been run on Windows, on any task, and gates
+4a/4b/4e stay unticked for exactly that reason.**
 
 `tests/test_flowbar_legend.py` is superseded and its cases move to the strip.
 
