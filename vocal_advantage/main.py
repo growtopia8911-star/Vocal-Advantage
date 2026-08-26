@@ -1128,8 +1128,13 @@ def _run_app_mac(config_path: Path = CONFIG_PATH) -> int:
     # The level tap the waveform reads: a plain float on the recorder, written
     # by PortAudio's thread and read lock-free by the renderer. No second
     # microphone stream.
+    # legend_for is unused here for now: Indicator no longer takes a `legend`
+    # string, it takes `hotkey` and `cancel_key` and lays out its own strip.
+    # Passing the hotkey through is the easy, safe part of that; wiring
+    # cancel_key (and dropping legend_for for good) is Task 8's job, once the
+    # renderer actually draws the strip.
     indicator = Indicator(
-        level_source=lambda: recorder.level, legend=legend_for(spec)
+        level_source=lambda: recorder.level, hotkey=str(spec)
     )
 
     dictionary = _load_dictionary()
