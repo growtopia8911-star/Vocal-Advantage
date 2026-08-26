@@ -1,4 +1,8 @@
-"""The pill/panel grow, and what the control strip says in each state.
+"""The pill and panel shapes, and what the control strip says in each state.
+
+Until 2026-08-25 the two shapes were also joined by an eased grow, and this
+file's tests were largely about it -- see `test_open_snaps_to_the_panel_on_
+the_very_first_frame` for what changed and why.
 
 Supersedes tests/test_flowbar_legend.py: the legend was a line of prose beside
 the trace, and it is now a laid-out strip of controls.
@@ -24,7 +28,12 @@ def settle(indicator, frames=200):
     return frame
 
 
-# --- the grow ---------------------------------------------------------------
+# --- the two shapes ----------------------------------------------------------
+#
+# Was "the grow": before 2026-08-25 the panel eased open and shut, and this
+# section's name and several of its test names said so. The grow itself is
+# gone -- see `test_open_snaps_to_the_panel_on_the_very_first_frame` below --
+# but the shapes it eased between are unchanged, so most of these still hold.
 
 def test_idle_rests_as_the_pill():
     frame = settle(an_indicator())
@@ -34,7 +43,7 @@ def test_idle_rests_as_the_pill():
     assert frame.radius == pytest.approx(panel.PILL_RADIUS, abs=0.1)
 
 
-def test_recording_grows_to_the_panel():
+def test_recording_opens_the_panel():
     indicator = an_indicator()
     indicator.show_recording()
     frame = settle(indicator)
@@ -63,11 +72,17 @@ def test_width_height_and_radius_never_move_independently():
         )
 
 
-def test_the_grow_is_a_fade_not_a_cut():
+def test_open_snaps_to_the_panel_on_the_very_first_frame():
+    """2026-08-25: the grow was removed at the user's request -- see
+    docs/plans/2026-08-25-flow-bar-panel.md's amendments. This test used to
+    be `test_the_grow_is_a_fade_not_a_cut` and asserted the opposite:
+    `0.0 < first.open < 1.0`, i.e. that the first frame was *mid*-grow. There
+    is no grow left to be mid of; `open` -- and the size it drives -- is
+    fully open on frame one. Only the alphas still ease."""
     indicator = an_indicator()
     indicator.show_recording()
     first = indicator.next_frame()
-    assert 0.0 < first.open < 1.0
+    assert first.open == pytest.approx(1.0, abs=1e-3)
 
 
 def test_transcribing_stays_open():
@@ -79,7 +94,7 @@ def test_transcribing_stays_open():
     assert frame.open == pytest.approx(1.0, abs=1e-3)
 
 
-def test_hiding_shrinks_back_to_the_pill():
+def test_hiding_returns_to_the_pill():
     indicator = an_indicator()
     indicator.show_recording()
     settle(indicator)
@@ -98,7 +113,7 @@ def test_a_message_never_opens_the_panel():
     assert frame.width > wf.PILL_WIDTH
 
 
-# --- the trace across the grow -----------------------------------------------
+# --- the trace across both shapes ---------------------------------------------
 
 def test_the_buffer_is_the_long_one():
     indicator = an_indicator()
@@ -114,13 +129,19 @@ def test_the_pill_windows_the_newest_bars():
     assert len(frame.heights) == wf.BAR_COUNT
 
 
-def test_the_grow_reveals_history_rather_than_clearing_it():
+def test_opening_the_panel_reveals_history_rather_than_clearing_it():
+    """Used to read `test_the_grow_reveals_history_rather_than_clearing_it`
+    and check that the bar count climbed gradually from BAR_COUNT to
+    BUFFER_BARS across ~60 frames as the panel grew. There is no grow left to
+    climb across: the count -- like every other size -- is at BUFFER_BARS on
+    frame one and stays there. What survives from the old test's point is
+    that it is still a *window onto the same running history*, not a
+    separate, freshly-cleared buffer -- `test_the_buffer_is_the_long_one`
+    above already covers that; this pins "instantly," not "gradually.\""""
     indicator = an_indicator()
     indicator.show_recording()
     counts = [len(indicator.next_frame().heights) for _ in range(60)]
-    assert counts == sorted(counts)
-    assert counts[0] >= wf.BAR_COUNT
-    assert counts[-1] <= wf.BUFFER_BARS
+    assert counts == [wf.BUFFER_BARS] * 60
 
 
 # --- what the strip says ------------------------------------------------------

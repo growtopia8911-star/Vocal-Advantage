@@ -4,6 +4,15 @@ Written 2026-08-25. Amends gate 1 of [`2026-08-25-interface-design.md`](2026-08-
 which reserved the Flow Bar's identity and added only a text legend. That gate
 is now partly reversed; see **Amendments** at the end.
 
+**Amended again, same day, after the grow shipped and the user saw it move.**
+The panel no longer *grows* open and shut -- it appears at full size and
+disappears, and idle now shows nothing at all. The prose below still
+describes the grow at length because the reasoning that produced the two
+*shapes* is still correct; only the eased transition between them is gone.
+See **"The grow removed" amendments** near the end for what changed, why, and
+which gates below are reversed rather than silently deleted -- the same way
+gate 1e's reversal is recorded, not erased.
+
 **Source of truth for every measurement below:** the native-resolution captures
 in `design-research/superwhisper/assets/` (gitignored), not the prose in
 [`../superwhisper-teardown.md`](../superwhisper-teardown.md). The teardown calls
@@ -19,7 +28,9 @@ All superwhisper figures are **÷2 from a 2× capture** and therefore in points.
 The Flow Bar becomes superwhisper's **main recording window**: a two-band
 rounded panel with a near-black waveform band above a charcoal control strip.
 It is one object with two shapes — a small resting pill that grows into the
-panel while you dictate and shrinks back afterwards.
+panel while you dictate and shrinks back afterwards. *(As shipped and then
+amended: the two shapes stayed, the grow between them did not — see "The grow
+removed" amendments.)*
 
 Not being built: their mini-window three-icon cluster, their resize toggle,
 their context-capture glyph. Reasons in **Rejected**.
@@ -79,11 +90,15 @@ IDLE                RECORDING                       TRANSCRIBING
  full-round          420 x 96, radius 12              right group absent
 ```
 
-The grow eases **width, height and corner radius together** (15 → 12), and the
-strip's alpha rides the width so it never draws squashed mid-animation.
-`point_origin` already treats its anchor as `(centre_x, bottom_y)`, so the
-bottom edge stays put and the panel opens upward — the correct behaviour at the
-bottom of a screen, for free.
+*As originally written, this grew:* the panel eased **width, height and
+corner radius together** (15 → 12), and the strip's alpha rode the width so
+it never drew squashed mid-animation. **Removed 2026-08-25 -- see "The grow
+removed" amendments.** `open` now snaps straight to its target instead of
+easing, so every size is fixed at one of the two shapes above and never in
+between. `point_origin` still treats its anchor as `(centre_x, bottom_y)`, so
+the bottom edge still does not move when the shape hops from one to the
+other — the correct behaviour at the bottom of a screen, for free, whether
+that hop is animated or not.
 
 ### The trace across both shapes
 
@@ -142,18 +157,20 @@ Drawing a `Stop` that stops nothing is worse than an empty strip.
 
 ## States
 
-| State | Shape | Dot | Trace | Right group |
-| --- | --- | --- | --- | --- |
-| `IDLE` | pill 78 × 30, alpha 0.82 | none | `idle_heights` | — |
-| `RECORDING` | panel 420 × 96 | `#FF453A` | live, from audio | `Stop` + `Cancel` |
-| `TRANSCRIBING` | panel 420 × 96 | `#3279C0` | `transcribing_heights` sweep | — |
-| `MESSAGE` | pill, widened to fit the text | none — a pill has no strip | replaced by the text | — |
+| State | Shape | Dot | Trace | Right group | On screen |
+| --- | --- | --- | --- | --- | --- |
+| `IDLE` | pill 78 × 30, alpha 0.82 → **0.0, since the grow removal** | none | `idle_heights` | — | no *(exception: "Move bar" — see the amendments)* |
+| `RECORDING` | panel 420 × 96 | `#FF453A` | live, from audio | `Stop` + `Cancel` | yes |
+| `TRANSCRIBING` | panel 420 × 96 | `#3279C0` | `transcribing_heights` sweep | — | yes |
+| `MESSAGE` | pill, widened to fit the text | none — a pill has no strip | replaced by the text | — | yes |
 
 `MESSAGE` stays pill-shaped. A panel is for dictating; "could not paste" should
 not open one. This preserves today's `message_width` behaviour unchanged.
 
 The existing `PILL_ALPHA` / `BAR_ALPHA` / `TEXT_ALPHA` tables and `FADE_ALPHA`
-easing are unchanged in shape — only the ground and bar colours invert.
+easing are unchanged in shape — only the ground and bar colours invert. The one
+value that later changed is `PILL_ALPHA[IDLE]`, from 0.82 to 0.0; see the
+amendments.
 
 ---
 
@@ -264,7 +281,22 @@ merely has a test file. Method for each group is under **Verification** below.
 ### 3. The two shapes
 
 - [x] 3a. Idle rests as a 78 × 30 full-round pill.
+      **Reversed 2026-08-25** — see "The grow removed" amendments below. Idle
+      now shows *nothing*: the pill only rests, visibly, while "Move bar" is
+      on. The shape itself (78 × 30, full-round) is unchanged and still what
+      draws in that one exception, and still what a `flash()` message widens
+      from — only "idle always rests as a visible pill" no longer holds.
 - [x] 3b. Recording grows it to the panel; width, height and radius all ease.
+      **Reversed 2026-08-25.** There is no more grow: recording opens the
+      panel at full size on its first frame, and every size — width, height,
+      radius, bar count — is fixed at one of the two shapes, never eased
+      between them. `open` is set directly to its target in `next_frame`
+      rather than eased. Pinned by
+      `test_open_snaps_to_the_panel_on_the_very_first_frame`
+      (`tests/test_flowbar_strip.py`, formerly `test_the_grow_is_a_fade_not_
+      a_cut`, which asserted the opposite) and
+      `test_no_frame_is_ever_an_intermediate_size_while_recording`
+      (`tests/test_flowbar.py`).
 - [x] 3c. The bottom edge does not move during the grow. **Fixed** in
       `78da93b` ("Pin the Windows Flow Bar's bottom edge as it grows into the
       panel"): `flowbar_win.pill_origin` now takes a live `height` parameter
@@ -283,10 +315,36 @@ merely has a test file. Method for each group is under **Verification** below.
       `CreateWindowExW`, `SetWindowPos` — staying visually put on a real
       screen. That is Win32 plumbing per the note below, and this tick does
       not claim it.
+      **Still holds after the grow removal, unchanged**, and now for a
+      simpler reason: the same origin arithmetic keeps the bottom edge fixed
+      whether the shape *eases* from pill to panel or *hops* — the panel
+      appearing already sized at 420 × 96 still has to anchor from the same
+      bottom edge the 78 × 30 pill did.
 - [x] 3d. The strip never draws squashed: its alpha rides the width.
+      **Moot after the grow removal, not wrong** — `panel.strip_alpha` is
+      unchanged and still gates the strip's own drawing (see the
+      implementation notes in "The grow removed" amendments for why it was
+      kept), but since `open` no longer passes through any value between 0
+      and 1, the strip is now always either fully hidden or fully grown and
+      never mid-ramp. Nothing left to draw squashed.
 - [x] 3e. The trace is one 69-slot buffer; the pill windows its newest 15, and
       the grow reveals history rather than clearing it.
+      **The "reveals" part is reversed 2026-08-25** — there is no more grow
+      to reveal it gradually across; the panel's full 69-bar window is there
+      on the first frame, same as every other size. The buffer/window
+      relationship itself is unchanged: it is still one running history, not
+      a separate freshly-cleared one, which is the part of this gate that
+      still holds — see `test_opening_the_panel_reveals_history_rather_than_
+      clearing_it` (`tests/test_flowbar_strip.py`, formerly `test_the_grow_
+      reveals_history_rather_than_clearing_it`), rewritten to assert the bar
+      count is `[BUFFER_BARS] * 60`, not a climbing sequence.
 - [x] 3f. A `flash()` message widens the pill and does not open the panel.
+      Unaffected by the grow removal: a message was never a panel state, so
+      it was never eased into or out of one, and its own width easing is
+      untouched — see "The grow removed" amendments for why that had to be
+      kept eased while the panel's own size stopped being.
+- [x] 3g. **New 2026-08-25.** Nothing is on screen at idle, except while
+      "Move bar" is on. See "The grow removed" amendments.
 
 ### 4. Interaction
 
@@ -432,6 +490,14 @@ the layered window under a real cursor, `WS_EX_TRANSPARENT` toggling driven by
 - **600 pt wide.** Faithful, and too much furniture over your work.
 - **Hiding the bar at idle.** Faithful to their window lifecycle, but it deletes
   the resting thing you glance at. The mini pill keeps it.
+  **Reversed 2026-08-25, later the same day, once the grow shipped and the
+  user saw it move.** The reasoning above was about the *grow* existing to
+  glance at, and the user's objection turned out to be to the grow itself,
+  not to the pill's continued presence for its own sake: "I actually don't
+  want my UI to show me it enhancing in size... it's just unnecessary." With
+  the grow gone there is nothing left this rejection was protecting, so the
+  bar now does hide at idle — see "The grow removed" amendments below for
+  what changed and the one exception ("Move bar" mode).
 - **Always-clickable.** Simplest code, but the panel would permanently eat
   clicks at the bottom of the screen, including ones meant for the Dock.
 - **WKWebView.** Available on macOS, absent on Windows, and wrong for a 60 fps
@@ -447,6 +513,133 @@ the layered window under a real cursor, `WS_EX_TRANSPARENT` toggling driven by
   text.
 - **Gate 1a is unchanged and still blocked** on gate 6. The dot and state word
   hold the slot.
+
+---
+
+## The grow removed (2026-08-25, later the same day)
+
+Everything above describes the panel this spec originally shipped: a small
+resting pill that *eased* open into the 420 × 96 panel and eased shut again.
+That shipped, the user watched it happen, and did not like it: "I actually
+don't want my UI to show me it enhancing in size. I'm not a big fan of how it
+looks and honestly it's just unnecessary." Given the choice between several
+options, they picked **nothing on screen at idle; the panel appears when
+recording starts and vanishes when it ends.**
+
+This section records what changed, kept in a separate section — rather than
+rewritten in place throughout — for the same reason the interface-design
+amendments above are: so a reader who wonders "why does `open` snap instead
+of easing" can find the reasoning, instead of finding a spec that quietly
+never mentioned the grow existed. The gates above are individually annotated
+with **Reversed** or **Moot** where this affects them; this section is the one
+place the whole change is explained together.
+
+**What changed:**
+
+- `open` — the scalar `width`, `height`, `radius` and bar count all derive
+  from — is set directly to its target in `Indicator.next_frame`
+  (`vocal_advantage/flowbar.py`) instead of eased. A state change now hops the
+  shape in one frame: the panel is 420 × 96 on the very first frame of
+  `RECORDING`/`TRANSCRIBING`, never smaller first.
+- `PILL_ALPHA[IDLE]` goes from 0.82 to 0.0. The resting pill used to be
+  visible on purpose ("it sits over your work all day"); now there is nothing
+  to purposely keep visible, because there is no resting pill to see.
+- The alphas still ease (`FADE_ALPHA`, unchanged) — the user objected to
+  *size* animating, not to a fade — so the panel still fades in and out at
+  its full, final size rather than cutting instantly. Only the size itself
+  stopped animating.
+- `MESSAGE`'s pill still widens to fit its text exactly as before, still
+  eased. It was never a panel state and is unaffected by any of this — except
+  for one seam: on the single frame a *panel* state (`RECORDING`/
+  `TRANSCRIBING`) hands off directly to `MESSAGE` (the real path when a
+  transcription finishes and the paste fails — `controller.py` calls `flash()`
+  straight from `TRANSCRIBING`, never through `IDLE`), the pill's width snaps
+  to its message target instead of easing from the panel's 420. Easing there
+  too would have eased the width down from 420 while the height had already
+  snapped to the pill's 30 — a squashed, panel-wide pill for a few frames,
+  which is a shrink in every way but name, and exactly what this change
+  exists to remove. `flowbar.py`'s `next_frame` tracks whether the previous
+  frame was a panel (`was_panel`) to tell the two cases apart.
+- `Frame` gains `visible: bool`. True for `RECORDING`, `TRANSCRIBING` and
+  `MESSAGE`; true for `IDLE` while "Move bar" is on; otherwise false for
+  `IDLE`, and — this is the part worth being precise about — *not* the
+  instant the state changes to `IDLE`. It stays true until `pill_alpha` has
+  actually eased down to (within `HIDE_ALPHA_EPS` of) zero, so the fade is
+  something a renderer gets to draw before the window disappears, rather than
+  being cut off by an instant hide. One rule, computed once in `flowbar.py`,
+  rather than each renderer re-deriving "nothing to see" from alpha itself.
+- Both renderers gate showing/hiding the actual window on `Frame.visible`:
+  `orderFrontRegardless()` / `orderOut_(None)` on macOS (the panel already
+  used the first for the reason documented at the top of `flowbar_mac.py` —
+  never `makeKeyAndOrderFront_`, which would steal focus and send the user's
+  next paste into this process instead of theirs), and `ShowWindow(hwnd,
+  SW_SHOWNOACTIVATE | SW_HIDE)` on Windows (never bare `SW_SHOW`, for the same
+  focus reason). Neither renderer shows the window unconditionally at
+  creation time any more — that decision now waits for the first computed
+  frame, exactly like every other frame-driven property.
+- Both renderers' cursor/click-through polling was found to have a latent bug
+  once a window could be hidden: `_contains`/`_hover_for` read `_last_layout`/
+  `_last_origin`, which are the *last drawn* geometry and go stale the moment
+  the window is hidden — an idle, hidden window sitting where a 420-wide
+  panel last was would still report the cursor "inside" it if the cursor
+  happened to be there, and would drop click-through on a window that is not
+  on screen to click. Fixed by ANDing the containment check with "is the
+  window currently shown" on both platforms.
+- Windows had a second latent bug: `_reposition` (called whenever the frame's
+  width changes) passed `SWP_SHOWWINDOW` to `SetWindowPos`, which would have
+  forced a hidden, idle window back on screen the moment its width next
+  changed by half a pixel — fighting the `ShowWindow` call meant to be the
+  sole authority on visibility. That flag is dropped from `_reposition`'s
+  call.
+- Nothing in `panel.py` changed. `bars_for_open`, `lerp`, `strip_alpha` and
+  the pill/panel geometry all still exist and are still called exactly as
+  before — `MESSAGE` still needs the pill geometry, and `strip_alpha` still
+  correctly gates the strip (see gate 3d's note: it is now moot in practice,
+  since `open` never passes through a partial value any more, but it is not
+  wrong, and removing it would have been removing a still-correct guard for
+  no reason).
+
+**The "Move bar" exception, and what shape it takes.** With nothing on
+screen at idle, "Move bar" mode — the tray toggle that makes the bar
+draggable, saving its position to `flow_bar_point` in `config.json` — would
+have nothing to grab. So `Frame.visible` is also true for `IDLE` while
+movable, on both platforms: `Indicator.set_movable(bool)` is a new,
+thread-safe setter (same shape as the existing `set_keys`), called by each
+renderer's own `set_movable` whenever the tray toggles it. **What that
+visible idle pill looks like while movable is the resting pill exactly as it
+was before this change** — `MOVABLE_IDLE_PILL_ALPHA = 0.82`, the same value
+`PILL_ALPHA[IDLE]` used to be, substituted in for `IDLE`'s target alpha only
+while movable is on. The alternative considered was some new "you can drag me"
+affordance (a distinct colour, a label), but the pill is what this bar has
+always looked like at rest, and "Move bar" is meant to answer "where did the
+bar go, and how do I get it back" — the most useful answer is the exact thing
+the user is trying to relocate, not a new shape they have to learn to
+recognise. macOS also draws its existing blue `_draw_move_outline` in this
+state, independent of `pill_alpha`, as it already did before this change;
+Windows has no equivalent (`render_frame` never grew one — a pre-existing
+platform asymmetry, not introduced here, and out of scope to fix in this
+pass), so the resting pill's own visibility is what Windows relies on for a
+grabbable target, which is exactly why `MOVABLE_IDLE_PILL_ALPHA` reusing a
+fully legible alpha (not some dim compromise) mattered more there than it
+might have on macOS alone.
+
+**Tests.** `tests/test_flowbar.py` gained a "visibility" section: idle is not
+visible, recording is, the panel is full-size on the first frame and never at
+an intermediate width or height for the rest of the recording, transcribing
+stays full-size, a flash message is visible and pill-shaped and opens no
+panel, leaving the panel snaps geometry immediately but still fades before
+hiding, a message expiring returns to not-visible, movable idle is visible
+*and actually draws something* (not just the flag — `pill_alpha` settles
+above 0.5), and turning movable back off lets idle fade out again.
+`tests/test_flowbar_strip.py`'s grow-specific tests were rewritten in place —
+see the gate 3b/3e annotations above for exactly what each one used to assert
+and asserts now. Both renderer test files gained source-inspection tests
+(the established pattern in both files, e.g. `test_click_through_is_the_
+default`) pinning: which platform call shows/hides the window, that it is
+gated on `frame.visible`, that neither window creation nor a resize
+force-shows it, and that the click-through guard cannot fire on a hidden
+window. All of the above were confirmed to fail against the pre-change
+implementation before the implementation changed, then pass after.
 
 ---
 

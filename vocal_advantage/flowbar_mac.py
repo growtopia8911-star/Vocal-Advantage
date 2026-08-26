@@ -469,6 +469,11 @@ class FlowBar:
         self._timer = None
         self._movable = False
         self._width = float(wf.PILL_WIDTH)
+        #: Whether the panel is currently ordered on screen. Tracked
+        #: separately from `Frame.visible` so `_tick` only calls
+        #: `orderFrontRegardless`/`orderOut_` on an actual transition, not
+        #: every frame.
+        self._shown = False
         #: What was last drawn, for hit-testing the *next* tick's cursor
         #: sample against. One frame stale, which at 60fps nobody can see.
         self._last_layout = None
@@ -517,8 +522,10 @@ class FlowBar:
         )
         self._view._on_click = self._on_click
         self._panel.setContentView_(self._view)
-        # Not makeKeyAndOrderFront_: that would activate us and steal focus.
-        self._panel.orderFrontRegardless()
+        # Not shown here, and not unconditionally: nothing is on screen at
+        # idle now, so whether the panel is ordered front at all is decided
+        # every tick from `frame.visible`, same as its size and its data.
+        # `_tick` reuses this exact call -- see there for the focus note.
 
         self._start_timer()
 
@@ -535,7 +542,14 @@ class FlowBar:
     def _tick(self) -> None:
         location = NSEvent.mouseLocation()
         hover = self._hover_for(location.x, location.y)
-        inside = self._contains(location.x, location.y)
+        # `and self._shown`: a hidden panel's `_last_layout`/`_last_origin`
+        # are stale geometry from wherever it last drew, and the cursor can
+        # easily be sitting inside that stale rect while the panel is off
+        # screen and idle. Without this, that would drop click-through on a
+        # window that is not there to click -- harmless to the user, who has
+        # nothing to click, but it would leave `_interactive` wrong for the
+        # moment the panel is next shown.
+        inside = self._contains(location.x, location.y) and self._shown
         if inside != self._interactive:
             self._interactive = inside
             # Move bar mode owns this flag while it is on; never fight it.
@@ -547,6 +561,17 @@ class FlowBar:
             self._resize(frame.width, frame.height)
         self._view.setData_(frame)
         self._view.setNeedsDisplay_(True)
+
+        if frame.visible != self._shown:
+            self._shown = frame.visible
+            if self._shown:
+                # Not the "make key" variant: that would activate us and
+                # steal focus, sending the user's next paste into our own
+                # process -- the one guarantee this file's docstring will
+                # not bend on.
+                self._panel.orderFrontRegardless()
+            else:
+                self._panel.orderOut_(None)
 
         # Recorded for the *next* tick's hit-test: `_hover_for`/`_contains`
         # must be pure, so they read this rather than the frame just drawn.
@@ -626,6 +651,9 @@ class FlowBar:
         blue outline the view draws is what makes that visible.
         """
         self._movable = bool(movable)
+        # So idle stays visible while there is something to drag -- see
+        # `flowbar.Indicator.set_movable`.
+        self._indicator.set_movable(self._movable)
         if self._panel is not None:
             self._panel.setIgnoresMouseEvents_(not self._movable)
         if self._view is not None:

@@ -12,8 +12,12 @@ Two halves, split along the thread boundary:
 * **The render thread only** calls `next_frame()`, 60 times a second: it drains
   the queue, polls the audio level, advances the easing and returns a `Frame`.
 
-`hide()` now means "go quiet", not "disappear". The bar is always visible, so
-the idle state *is* the hidden state -- a flat, dim, motionless row.
+`hide()` means "go idle". As of 2026-08-25 idle genuinely disappears -- the
+bar orders itself off screen rather than resting as a dim pill, at the user's
+request (see docs/plans/2026-08-25-flow-bar-panel.md's amendments). The one
+exception is "Move bar" mode, which needs something on screen to grab.
+`Frame.visible` is the single rule both renderers show/hide against, computed
+once here rather than re-derived from alpha in two places.
 
 Time is counted in frames rather than read off a clock, exactly as the old pill
 counted pumps. `next_frame()` is called on a fixed interval, so frames are an
@@ -59,6 +63,12 @@ MESSAGE_PADDING = 22.0
 #: "could not paste" should not need one.
 PANEL_STATES = frozenset({RECORDING, TRANSCRIBING})
 
+#: The states that keep the bar on screen even though nothing else says so.
+#: IDLE is the only state left out -- and even IDLE is visible while "Move
+#: bar" is on, which `next_frame` handles separately since it is a toggle, not
+#: a state. See `Frame.visible`.
+VISIBLE_STATES = frozenset({RECORDING, TRANSCRIBING, MESSAGE})
+
 #: The states that show the strip's right-hand controls.
 #:
 #: RECORDING only, and the exclusions are each a decision. Not IDLE: the
@@ -70,18 +80,26 @@ PANEL_STATES = frozenset({RECORDING, TRANSCRIBING})
 CONTROL_STATES = frozenset({RECORDING})
 
 # --- how bright the pill and its bars are in each state ---------------------
-# The pill brightens slightly while recording; idle is dimmer than everything
-# else because it is what you look at all day.
+# The pill brightens slightly while recording. IDLE used to rest at a dim 0.82
+# -- visible on purpose, since it sat over your work all day. Removed
+# 2026-08-25 at the user's request ("I don't want my UI to show me it
+# enhancing in size... it's just unnecessary"): idle is now 0.0, nothing on
+# screen at rest. See docs/plans/2026-08-25-flow-bar-panel.md's amendments.
 #: Opacity of the whole pill -- ground and outline together, so a state change
-#: firms up the entire object rather than tinting part of it. Not fully opaque
-#: at rest: it sits over your work all day and should look laid on the screen
-#: rather than punched into it.
+#: firms up the entire object rather than tinting part of it.
 PILL_ALPHA = {
-    IDLE: 0.82,
+    IDLE: 0.0,
     RECORDING: 0.96,
     TRANSCRIBING: 0.90,
     MESSAGE: 0.96,
 }
+#: What the pill's own alpha eases toward at rest while "Move bar" is on.
+#: `PILL_ALPHA[IDLE]` is 0.0 -- nothing on screen at idle -- but the one time
+#: that is wrong is while the bar has to stay visible to be dragged. Reuses
+#: the old resting pill's alpha rather than inventing a new look: the pill is
+#: what this bar has always been at rest, so it is the shape most likely to
+#: already read as "grab here."
+MOVABLE_IDLE_PILL_ALPHA = 0.82
 BAR_ALPHA = {
     IDLE: 0.55,
     RECORDING: 1.0,
@@ -97,9 +115,16 @@ TEXT_ALPHA = {
     MESSAGE: 1.0,
 }
 
-#: The alphas and the pill width ease like everything else, so a state change
-#: is a fade rather than a cut.
+#: The alphas always ease, and so does the pill's own width when the shape is
+#: staying a pill (MESSAGE widening to fit its text). `open` -- and the panel
+#: size it drives -- does not: see `next_frame`.
 FADE_ALPHA = 0.18
+
+#: How close `pill_alpha` must get to its IDLE target before the window is
+#: actually taken off screen. `_ease` only approaches a target
+#: asymptotically, so waiting for exactly 0.0 would never fire; this is
+#: "close enough that the fade has visually finished."
+HIDE_ALPHA_EPS = 0.01
 
 
 def message_width(text: str) -> float:
@@ -124,9 +149,10 @@ class Frame:
     pill_alpha: float
     bar_alpha: float
     text_alpha: float
-    #: 0 = the resting pill, 1 = the open panel. The single scalar the whole
-    #: grow derives from: width, height, radius, bar count and strip opacity
-    #: are all read off it, so no two of them can fall out of step.
+    #: 0 = the resting pill, 1 = the open panel. Height, radius and bar count
+    #: are all read off it, so no two of them can fall out of step. Snapped
+    #: straight to its target in `next_frame`, never eased -- there is no
+    #: grow left to derive, only a hop between two fixed shapes.
     open: float = 0.0
     height: float = float(wf.PILL_HEIGHT)
     radius: float = panel.PILL_RADIUS
@@ -135,6 +161,13 @@ class Frame:
     #: The id of the item under the cursor, or "". Supplied by the platform
     #: layer, which is the only thing that knows where the cursor is.
     hover: str = ""
+    #: Whether the bar should be on screen at all right now. True for every
+    #: state but IDLE, true for IDLE too while "Move bar" is on, and -- for a
+    #: plain IDLE -- true until the alpha fade has actually reached zero, so
+    #: the window is never yanked off screen mid-fade. One rule, computed
+    #: once in `next_frame`, so a renderer never has to re-derive "nothing to
+    #: see" from alpha itself.
+    visible: bool = True
 
 
 class Indicator:
@@ -185,6 +218,9 @@ class Indicator:
         self._bar_alpha = BAR_ALPHA[IDLE]
         self._text_alpha = TEXT_ALPHA[IDLE]
         self._open = 0.0
+        #: Whether "Move bar" is on. Set by the platform layer, the only
+        #: thing that knows -- same shape as `_hotkey`/`_cancel_key` below.
+        self._movable = False
 
     # --- callable from any thread ------------------------------------------
 
@@ -199,7 +235,8 @@ class Indicator:
         self._commands.put((TRANSCRIBING, ""))
 
     def hide(self) -> None:
-        """Go quiet. The bar stays on screen; this is the idle state."""
+        """Go idle. The bar fades out and, once the fade finishes, disappears
+        -- unless "Move bar" is on, in which case it stays visible to drag."""
         self._status = STATUS_TEXT[IDLE]
         self._state_name = IDLE
         self._commands.put((IDLE, ""))
@@ -233,6 +270,18 @@ class Indicator:
         self._hotkey = hotkey
         self._cancel_key = cancel_key
 
+    def set_movable(self, movable: bool) -> None:
+        """Told by the platform layer whenever "Move bar" is toggled.
+
+        Plain attribute assignment, exactly like `set_keys` above: safe from
+        any thread because `next_frame` only ever reads a whole `bool` on the
+        render thread, and CPython never hands back a half-written one.
+
+        This is what keeps idle visible while the bar is draggable -- see
+        `next_frame` and `MOVABLE_IDLE_PILL_ALPHA`.
+        """
+        self._movable = bool(movable)
+
     def state_name(self) -> str:
         """The raw state, for the tray's status dot. Safe from any thread."""
         return self._state_name
@@ -262,20 +311,39 @@ class Indicator:
 
         heights = self._advance_wave()
 
-        self._open = _ease(
-            self._open, 1.0 if self._mode in PANEL_STATES else 0.0, FADE_ALPHA
-        )
-        target_width = (
-            panel.PANEL_WIDTH
-            if self._mode in PANEL_STATES
-            else message_width(self._text)
-            if self._mode == MESSAGE
-            else float(wf.PILL_WIDTH)
-        )
-        self._width = _ease(self._width, target_width, FADE_ALPHA)
-        self._pill_alpha = _ease(
-            self._pill_alpha, PILL_ALPHA[self._mode], FADE_ALPHA
-        )
+        # `open` is set DIRECTLY to its target, never eased: it is what
+        # `height`, `radius` and the bar count below are all read off, and
+        # easing it is exactly what used to grow and shrink the panel. A
+        # state change now hops the shape in one frame; only the alphas (and,
+        # for a shape that is staying a pill, the width) keep easing, so what
+        # is left to see is a fade, not a resize.
+        was_panel = self._open >= 1.0
+        self._open = 1.0 if self._mode in PANEL_STATES else 0.0
+
+        if self._mode in PANEL_STATES:
+            # Full size the instant it appears -- never eased into.
+            self._width = panel.PANEL_WIDTH
+        else:
+            target_width = (
+                message_width(self._text)
+                if self._mode == MESSAGE
+                else float(wf.PILL_WIDTH)
+            )
+            # Still eased pill-to-pill -- a message widening to fit its text,
+            # exactly as before -- but snapped, not eased, on the one frame
+            # the shape just dropped out of the panel. Easing here too would
+            # ease the width down from 420 while the height has already
+            # snapped to the pill's 30: a squashed, panel-wide pill for a few
+            # frames, which is a shrink in every way but name.
+            self._width = (
+                target_width if was_panel
+                else _ease(self._width, target_width, FADE_ALPHA)
+            )
+
+        pill_alpha_target = PILL_ALPHA[self._mode]
+        if self._mode == IDLE and self._movable:
+            pill_alpha_target = MOVABLE_IDLE_PILL_ALPHA
+        self._pill_alpha = _ease(self._pill_alpha, pill_alpha_target, FADE_ALPHA)
         self._bar_alpha = _ease(
             self._bar_alpha, BAR_ALPHA[self._mode], FADE_ALPHA
         )
@@ -306,6 +374,11 @@ class Indicator:
             ),
             strip=self._strip(),
             hover=hover,
+            visible=(
+                self._mode in VISIBLE_STATES
+                or self._movable
+                or self._pill_alpha > HIDE_ALPHA_EPS
+            ),
         )
 
     def _strip(self) -> tuple[panel.StripItem, ...]:

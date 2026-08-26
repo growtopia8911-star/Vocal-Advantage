@@ -50,6 +50,7 @@ WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_TOPMOST = 0x00000008
 
+SW_HIDE = 0
 SW_SHOWNOACTIVATE = 4
 HWND_TOPMOST = -1
 SWP_NOSIZE = 0x0001
@@ -522,6 +523,10 @@ class FlowBar:
         self._movable = False
         self._hwnd = None
         self._width = int(wf.PILL_WIDTH)
+        #: Whether the window is currently shown. Tracked separately from
+        #: `Frame.visible` so `_draw` only calls `ShowWindow` on an actual
+        #: transition, not every frame.
+        self._shown = False
         self._stop = threading.Event()
         self._thread = None
         self._wndproc = None      # must outlive the window or Windows calls freed memory
@@ -619,16 +624,25 @@ class FlowBar:
         # So the shared window procedure can find this instance again.
         _WINDOWS[int(self._hwnd)] = self
 
-        # ShowWindow with SW_SHOWNOACTIVATE, never SW_SHOW: the overlay must
-        # not take focus even once, or the first paste of the session lands in
-        # our own process.
-        _user32.ShowWindow(self._hwnd, SW_SHOWNOACTIVATE)
+        # Not shown here, and not unconditionally: nothing is on screen at
+        # idle now, so whether the window is shown at all is decided every
+        # draw from `frame.visible`, in `_draw` below -- which always uses
+        # SW_SHOWNOACTIVATE, never SW_SHOW, for the same reason this used to
+        # be here: the overlay must not take focus even once, or the first
+        # paste of the session lands in our own process.
 
     def _draw(self) -> None:
         point = POINT()
         _user32.GetCursorPos(ctypes.byref(point))
         hover = self._hover_for(float(point.x), float(point.y))
-        inside = self._contains(float(point.x), float(point.y))
+        # `and self._shown`: a hidden window's `_last_layout`/`_last_origin`
+        # are stale geometry from wherever it last drew, and the cursor can
+        # easily be sitting inside that stale rect while the window is off
+        # screen and idle. Without this, that would drop click-through on a
+        # window that is not there to click -- harmless to the user, who has
+        # nothing to click, but it would leave `_interactive` wrong for the
+        # moment the window is next shown.
+        inside = self._contains(float(point.x), float(point.y)) and self._shown
         if inside != self._interactive:
             self._interactive = inside
             # Move bar mode owns this bit while it is on; never fight it.
@@ -688,6 +702,13 @@ class FlowBar:
         _gdi32.DeleteObject(bitmap)
         _gdi32.DeleteDC(mem_dc)
         _user32.ReleaseDC(None, screen_dc)
+
+        if frame.visible != self._shown:
+            self._shown = frame.visible
+            # SW_SHOWNOACTIVATE, never SW_SHOW -- see `_create_window`.
+            _user32.ShowWindow(
+                self._hwnd, SW_SHOWNOACTIVATE if self._shown else SW_HIDE
+            )
 
         # Recorded for the *next* draw's hit-test: `_hover_for`/`_contains`
         # must be pure, so they read this rather than the frame just drawn.
@@ -765,6 +786,9 @@ class FlowBar:
         while it is set, the pill really does intercept clicks.
         """
         self._movable = bool(movable)
+        # So idle stays visible while there is something to drag -- see
+        # `flowbar.Indicator.set_movable`.
+        self._indicator.set_movable(self._movable)
         if not self._hwnd:
             return
         ex = _user32.GetWindowLongW(self._hwnd, GWL_EXSTYLE)
@@ -784,11 +808,17 @@ class FlowBar:
         return [(rect.left + rect.right) / 2.0, float(rect.bottom)]
 
     def _reposition(self, width: int, height: int) -> None:
-        """Re-anchor as the pill widens for a message, so it does not drift."""
+        """Re-anchor as the pill widens for a message, so it does not drift.
+
+        Deliberately missing the flag that would force the window on screen:
+        that would fight the `ShowWindow` call in `_draw`, the sole authority
+        on visibility, popping a hidden idle window back up the moment its
+        size next changed by half a pixel. A resize is a resize, not a vote
+        to be seen.
+        """
         x, y = self._origin(width, height)
         _user32.SetWindowPos(
-            self._hwnd, HWND_TOPMOST, x, y, width, height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            self._hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE,
         )
 
     def _destroy_window(self) -> None:

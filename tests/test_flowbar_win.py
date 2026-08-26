@@ -586,3 +586,57 @@ def test_click_through_is_the_default():
     from vocal_advantage import flowbar_win
     source = inspect.getsource(flowbar_win.FlowBar._create_window)
     assert "WS_EX_TRANSPARENT" in source
+
+
+# --- nothing on screen at idle (2026-08-25) -----------------------------------
+#
+# The window itself cannot be verified from this Mac -- see the module
+# docstring. What is pinned here, the same way `test_click_through_is_the_
+# default` above already pins other window-creation wiring by reading the
+# source: which Win32 calls show and hide the window, that they are gated on
+# `frame.visible`, that neither window creation nor a resize force-shows it,
+# and that the hover/click-through guard cannot fire on a hidden window.
+
+
+def test_draw_shows_and_hides_the_window_based_on_frame_visible():
+    import inspect
+    from vocal_advantage import flowbar_win
+    source = inspect.getsource(flowbar_win.FlowBar._draw)
+    assert "if frame.visible != self._shown:" in source
+    assert "SW_SHOWNOACTIVATE if self._shown else SW_HIDE" in source
+
+
+def test_draw_never_drops_click_through_on_a_hidden_window():
+    """A hidden window's `_last_layout`/`_last_origin` are stale geometry
+    from wherever it last drew. Without `and self._shown`, a cursor that
+    happens to sit inside that stale rect would drop click-through on a
+    window that is not there to click, and leave `_interactive` wrong for the
+    moment the window is next shown."""
+    import inspect
+    from vocal_advantage import flowbar_win
+    source = inspect.getsource(flowbar_win.FlowBar._draw)
+    assert (
+        "self._contains(float(point.x), float(point.y)) and self._shown"
+        in source
+    )
+
+
+def test_window_creation_does_not_unconditionally_show_the_window():
+    """Nothing is on screen at idle now, so `_create_window` must not call
+    `ShowWindow` itself -- that is `_draw`'s call alone, gated on
+    `frame.visible`, the first time it runs. Never bare SW_SHOW either way."""
+    import inspect
+    from vocal_advantage import flowbar_win
+    source = inspect.getsource(flowbar_win.FlowBar._create_window)
+    assert "ShowWindow" not in source
+
+
+def test_reposition_does_not_force_the_window_to_show():
+    """`SetWindowPos`'s `SWP_SHOWWINDOW` flag would force a hidden, idle
+    window back on screen the moment its size next changed by half a pixel --
+    fighting the `ShowWindow` call in `_draw` that is meant to be the sole
+    authority on visibility."""
+    import inspect
+    from vocal_advantage import flowbar_win
+    source = inspect.getsource(flowbar_win.FlowBar._reposition)
+    assert "SWP_SHOWWINDOW" not in source

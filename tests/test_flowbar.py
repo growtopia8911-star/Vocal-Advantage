@@ -16,10 +16,12 @@ import threading
 
 import pytest
 
+from vocal_advantage import panel
 from vocal_advantage import waveform as wf
 from vocal_advantage.flowbar import (
     IDLE,
     MESSAGE,
+    MESSAGE_FRAMES,
     RECORDING,
     TRANSCRIBING,
     Indicator,
@@ -286,8 +288,10 @@ def test_hide_cancels_a_flash():
 
 # --- the controller's four methods, from any thread -------------------------
 
-def test_hide_returns_to_idle_without_hiding_the_bar():
-    # The bar is always visible now; hide() means "go quiet", not "disappear".
+def test_hide_returns_to_the_idle_state():
+    # Whether the bar is still *drawn* on screen at that point is a separate,
+    # alpha-gated question -- see the "visibility" section below. `hide()`'s
+    # job is only ever to move the state machine back to IDLE.
     indicator = Indicator()
     indicator.show_recording()
     indicator.next_frame()
@@ -343,3 +347,109 @@ def test_status_text_updates_without_a_render_loop():
     indicator = Indicator()
     indicator.show_recording()
     assert indicator.status_text() == "Recording"
+
+
+# --- visibility (2026-08-25: the grow removed, idle now shows nothing) ------
+#
+# The user disliked watching the bar animate open: "I don't want my UI to
+# show me it enhancing in size... it's just unnecessary." The panel now
+# appears at full size the instant recording starts and disappears when it
+# ends, rather than growing and shrinking. `Frame.visible` is the one signal
+# both renderers hide/show a window against -- see docs/plans/
+# 2026-08-25-flow-bar-panel.md's amendments for the fuller reasoning.
+
+
+def test_idle_is_not_visible():
+    assert Indicator().next_frame().visible is False
+
+
+def test_recording_is_visible():
+    indicator = Indicator()
+    indicator.show_recording()
+    assert indicator.next_frame().visible is True
+
+
+def test_the_panel_is_full_size_on_the_first_frame():
+    indicator = Indicator()
+    indicator.show_recording()
+    frame = indicator.next_frame()
+    assert (frame.width, frame.height) == (panel.PANEL_WIDTH, panel.PANEL_HEIGHT)
+
+
+def test_no_frame_is_ever_an_intermediate_size_while_recording():
+    # The whole point: no eased width or height, ever -- not on the first
+    # frame, and not on any frame after it either.
+    indicator = Indicator()
+    indicator.show_recording()
+    for _ in range(120):
+        frame = indicator.next_frame()
+        assert (frame.width, frame.height) == (
+            panel.PANEL_WIDTH, panel.PANEL_HEIGHT,
+        )
+
+
+def test_transcribing_stays_visible_and_full_size():
+    indicator = Indicator()
+    indicator.show_processing()
+    frame = indicator.next_frame()
+    assert frame.visible is True
+    assert (frame.width, frame.height) == (panel.PANEL_WIDTH, panel.PANEL_HEIGHT)
+
+
+def test_a_flash_message_is_visible_and_pill_shaped_and_opens_no_panel():
+    indicator = Indicator()
+    indicator.flash("could not paste - press Ctrl+V")
+    frame = indicator.next_frame()
+    assert frame.visible is True
+    assert frame.open == 0.0
+    assert frame.height == float(wf.PILL_HEIGHT)
+
+
+def test_leaving_the_panel_snaps_geometry_but_still_fades_before_hiding():
+    # `open` -- and the size it drives -- snaps immediately: there is no
+    # intermediate width or height on the way out either. But the frame stays
+    # `visible` for a few more frames while `pill_alpha` eases down, and only
+    # goes not-visible once that fade has actually finished -- hiding the
+    # instant the mode changes would cut the fade off before it is seen.
+    indicator = Indicator()
+    indicator.show_recording()
+    for _ in range(30):
+        indicator.next_frame()
+    indicator.hide()
+    frame = indicator.next_frame()
+    assert (frame.width, frame.height) == (float(wf.PILL_WIDTH), float(wf.PILL_HEIGHT))
+    assert frame.visible is True
+    assert drain(indicator, 200).visible is False
+
+
+def test_after_a_message_expires_the_bar_becomes_not_visible_again():
+    indicator = Indicator()
+    indicator.flash("could not paste - press Ctrl+V")
+    assert drain(indicator, MESSAGE_FRAMES - 1).visible is True
+    # Enough further frames for the mode to fall back to IDLE *and* for the
+    # alpha fade that follows it to actually finish.
+    assert drain(indicator, 400).visible is False
+
+
+def test_while_movable_idle_is_visible():
+    indicator = Indicator()
+    indicator.set_movable(True)
+    assert indicator.next_frame().visible is True
+
+
+def test_while_movable_idle_actually_draws_something_not_just_a_flag():
+    # `visible` alone is not the whole promise -- if the pill's own alpha
+    # settled at 0 there would be nothing to see even in an on-screen window.
+    # Movable idle reuses the old resting pill's alpha instead.
+    indicator = Indicator()
+    indicator.set_movable(True)
+    frame = drain(indicator, 200)
+    assert frame.pill_alpha > 0.5
+
+
+def test_turning_movable_off_lets_idle_fade_out_again():
+    indicator = Indicator()
+    indicator.set_movable(True)
+    drain(indicator, 200)
+    indicator.set_movable(False)
+    assert drain(indicator, 200).visible is False

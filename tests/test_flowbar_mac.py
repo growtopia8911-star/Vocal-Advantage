@@ -505,3 +505,48 @@ def test_message_text_is_legible_against_the_near_black_pill():
         f"brightest text pixel ({brightest:.3f}) is not legible against the "
         f"pill ground ({ground:.3f}) -- the flash() message would be invisible"
     )
+
+
+# --- nothing on screen at idle (2026-08-25) -----------------------------------
+#
+# `_tick` reads the real cursor (`NSEvent.mouseLocation()`), so -- exactly as
+# the hover/click-through section above documents -- it is hand-checked, not
+# unit tested, for its live behaviour. What *is* pinned here, the same way
+# `test_click_through_is_the_default` and
+# `test_panel_height_is_taken_from_the_frame_not_the_constant` already pin
+# other `_tick`/`open` wiring by reading the source: which AppKit calls show
+# and hide the panel, that they are gated on `frame.visible`, that `open`
+# never force-shows it, and that the hover/click-through guard cannot fire on
+# a hidden window.
+
+
+def test_tick_shows_and_hides_the_panel_based_on_frame_visible():
+    import inspect
+    source = inspect.getsource(flowbar_mac.FlowBar._tick)
+    assert "if frame.visible != self._shown:" in source
+    assert "orderFrontRegardless()" in source
+    assert "orderOut_(None)" in source
+    # The one non-negotiable constraint in this file's own docstring: never
+    # activate, or the user's next paste lands in our own process.
+    assert "makeKeyAndOrderFront_" not in source
+
+
+def test_tick_never_drops_click_through_on_a_hidden_panel():
+    """A hidden panel's `_last_layout`/`_last_origin` are stale geometry from
+    wherever it last drew. Without `and self._shown`, a cursor that happens
+    to sit inside that stale rect would drop click-through on a window that
+    is not there to click, and leave `_interactive` wrong for the moment the
+    panel is next shown."""
+    import inspect
+    source = inspect.getsource(flowbar_mac.FlowBar._tick)
+    assert "self._contains(location.x, location.y) and self._shown" in source
+
+
+def test_open_does_not_unconditionally_show_the_panel():
+    """Nothing is on screen at idle now, so `open()` must not order the panel
+    front itself -- that is `_tick`'s call alone, gated on `frame.visible`,
+    the first time it runs."""
+    import inspect
+    source = inspect.getsource(flowbar_mac.FlowBar.open)
+    assert "orderFrontRegardless" not in source
+    assert "orderOut_" not in source
